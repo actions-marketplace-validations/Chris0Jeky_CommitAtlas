@@ -65,7 +65,7 @@ jobs:
 
       - name: Check out the proven commit
         if: steps.credentials.outputs.configured == 'true'
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.workflow_run.head_sha }}
           persist-credentials: false
