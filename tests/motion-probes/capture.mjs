@@ -9,6 +9,7 @@
  *   node tests/motion-probes/capture.mjs --browser "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --out C:\\temp\\commitatlas-motion
  *   node tests/motion-probes/capture.mjs --browser "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --asset-base https://example.invalid/probes/ --host-label worker-direct --out C:\\temp\\commitatlas-motion
  */
+import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { inflateSync } from "node:zlib";
@@ -23,6 +24,12 @@ export const probes = [
 ];
 const embeds = ["img", "picture"];
 const playwrightEngines = ["chromium", "firefox", "webkit"];
+const directVerdicts = new Set([
+  "animates",
+  "frozen at frame zero",
+  "frozen at from-state",
+  "no motion detected",
+]);
 // A 250 ms frame sits inside the shipped CSS-enter effect (60 ms delay + 380 ms duration).
 export const frameTimes = [0, 250, 500, 2_000, 5_000];
 export const motionPixelThreshold = { changedPixels: 16, totalChannelDelta: 1_000 };
@@ -144,7 +151,7 @@ export async function createFreshOutputDirectory(outputDirectory) {
   }
 }
 
-export function compatibilityEvidenceStatus(browserVersion, complete = true) {
+export function compatibilityEvidenceStatus(browserVersion, complete = false) {
   if (!complete) {
     return {
       eligible: false,
@@ -173,6 +180,60 @@ export function reducedMotionControlSelected(selectedSource) {
     return false;
   }
   return parsed.pathname.endsWith("/reduced-motion-control.svg");
+}
+
+export function directReducedMotionEvidence(reducedMotion, selectedSource, reducedMotionControlPixels) {
+  if (reducedMotion && (typeof selectedSource !== "string" || selectedSource.length === 0)) {
+    throw new Error("reduced-motion direct capture must retain the browser-selected currentSrc");
+  }
+  return {
+    reducedMotionControlPixels,
+    reducedMotionControlVerified: Boolean(
+      reducedMotion
+      && reducedMotionControlSelected(selectedSource)
+      && reducedMotionControlPixels > 0
+    ),
+  };
+}
+
+export function validateCompletedDirectReport(report) {
+  assert.ok(Array.isArray(report.selectedProbes) && report.selectedProbes.length > 0, "complete direct report must declare selected probes");
+  assert.ok(Array.isArray(report.selectedEmbeds) && report.selectedEmbeds.length > 0, "complete direct report must declare selected embeds");
+  const expectedIdentities = new Set(report.selectedProbes.flatMap((probe) => (
+    report.selectedEmbeds.map((embed) => `${probe}\0${embed}`)
+  )));
+  assert.equal(
+    report.rows.length,
+    expectedIdentities.size,
+    "complete direct report must contain every selected probe/embed row",
+  );
+  const identities = new Set();
+  for (const row of report.rows) {
+    const identity = `${row.probe}\0${row.embed}`;
+    assert.ok(!identities.has(identity), `duplicate direct capture row ${identity}`);
+    assert.ok(expectedIdentities.has(identity), `unselected direct capture row ${identity}`);
+    identities.add(identity);
+    assert.ok(row.engine, `${identity} must retain the browser engine`);
+    assert.deepEqual(
+      row.captures.map((capture) => capture.targetTimeMs ?? capture.timeMs),
+      frameTimes,
+      `${identity} must retain every target frame`,
+    );
+    assert.equal(
+      row.differences.length,
+      frameTimes.length - 1,
+      `${identity} must retain every adjacent frame comparison`,
+    );
+    assert.ok(directVerdicts.has(row.verdict), `${identity} must retain a measured verdict`);
+    if (report.reducedMotion) {
+      assert.ok(row.selectedSource, `${identity} reduced-motion row must retain currentSrc`);
+    }
+    if (report.recordVideo) {
+      assert.ok(row.video?.path, `${identity} recorded row must retain its video path`);
+      assert.match(row.video?.sha256 ?? "", /^[a-f0-9]{64}$/u, `${identity} recorded row must retain its video SHA-256`);
+    }
+  }
+  assert.deepEqual(identities, expectedIdentities, "complete direct report must match its selected probe/embed matrix exactly");
 }
 
 function svgDimensions(body) {
@@ -204,6 +265,19 @@ export async function validateHostedAssets(assetBase, selectedProbes, reducedMot
     observations.push(await validateHostedAssetResponse(probe, response, expectedBody));
   }
   return observations;
+}
+
+async function writeJsonAtomic(file, value) {
+  const temporary = `${file}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`);
+  await rename(temporary, file);
+}
+
+export async function writePartialDirectReport(file, report, error) {
+  const partialReport = error === undefined
+    ? report
+    : { ...report, failure: error instanceof Error ? error.message : String(error) };
+  await writeJsonAtomic(file, partialReport);
 }
 
 export async function capture(options) {
@@ -243,8 +317,8 @@ export async function capture(options) {
   if (!address || typeof address === "string") throw new Error("fixture server did not bind a TCP port");
   const origin = `http://127.0.0.1:${address.port}/`;
 
-  try {
   const browserVersion = recordedBrowser?.version() ?? null;
+  const partialFile = path.join(outputDirectory, "report.partial.json");
   const report = {
     status: "partial",
     protocol: recordVideo
@@ -258,11 +332,15 @@ export async function capture(options) {
     motionPixelThreshold,
     reducedMotion,
     recordVideo,
+    selectedProbes: [...selectedProbes],
+    selectedEmbeds: [...selectedEmbeds],
     assetBase,
     hostedAssetObservations,
     hostLabel,
     rows: [],
   };
+  try {
+  await writePartialDirectReport(partialFile, report);
   for (const probe of selectedProbes) {
     for (const embed of selectedEmbeds) {
       const directory = path.join(outputDirectory, `${probe}--${embed}`);
@@ -362,9 +440,12 @@ export async function capture(options) {
         ...pixelDifference(images[index], image),
       }));
       const reducedMotionControlPixels = reducedMotion ? countPixel(images[0], [255, 209, 102, 255]) : null;
-      const reducedMotionControlVerified = reducedMotion
-        && reducedMotionControlSelected(selectedSource)
-        && reducedMotionControlPixels > 0;
+      const reducedMotionEvidence = directReducedMotionEvidence(
+        reducedMotion,
+        selectedSource,
+        reducedMotionControlPixels,
+      );
+      const reducedMotionControlVerified = reducedMotionEvidence.reducedMotionControlVerified;
       report.rows.push({
         probe,
         host: hostLabel,
@@ -375,19 +456,23 @@ export async function capture(options) {
         video,
         differences,
         selectedSource,
-        reducedMotionControlPixels,
+        reducedMotionControlPixels: reducedMotionEvidence.reducedMotionControlPixels,
         reducedMotionControlVerified,
         verdict: classifyMotion(probe, images, differences, {
           frameZeroReferenceVerified: reducedMotionControlVerified,
         }),
       });
-      await writeFile(path.join(outputDirectory, "report.partial.json"), `${JSON.stringify(report, null, 2)}\n`);
+      await writePartialDirectReport(partialFile, report);
     }
   }
+  validateCompletedDirectReport(report);
   report.status = "complete";
   report.compatibilityEvidence = compatibilityEvidenceStatus(browserVersion, true);
   await writeFile(path.join(outputDirectory, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  } catch (error) {
+    await writePartialDirectReport(partialFile, report, error);
+    throw error;
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     await recordedBrowser?.close();
