@@ -10,6 +10,7 @@ import { calculateContributionMetrics } from "@commit-atlas/core";
 import {
   assembleStaticPortfolio,
   codeSpan,
+  generateStatic,
   generateStaticFromSnapshot,
   loadStaticConfig,
   parseStaticConfig,
@@ -38,6 +39,16 @@ test("validates one contained config and rejects ambiguous projects or card sele
   }), /owned by the configured user/);
 });
 
+
+test("accepts all four motion profiles, keeps the still default, and rejects unknown values", () => {
+  for (const motion of ["none", "subtle", "ambient", "cinematic"]) {
+    assert.equal(parseStaticConfig({ ...rawConfig(), motion }).motion, motion);
+  }
+  const withoutMotion = rawConfig();
+  Reflect.deleteProperty(withoutMotion, "motion");
+  assert.equal(parseStaticConfig(withoutMotion).motion, "none");
+  assert.throws(() => parseStaticConfig({ ...rawConfig(), motion: "warp" }), /invalid|option/i);
+});
 test("accepts bounded opposite-scheme theme outputs and rejects ambiguous variants", () => {
   const paired = parseStaticConfig({
     ...rawConfig(),
@@ -78,6 +89,40 @@ test("accepts bounded opposite-scheme theme outputs and rejects ambiguous varian
   }), /too_big|at most/i);
 });
 
+test("accepts two-year contribution windows and rejects wider ones", () => {
+  assert.equal(parseStaticConfig({ ...rawConfig(), days: 366 }).days, 366);
+  assert.equal(parseStaticConfig({ ...rawConfig(), days: 730 }).days, 730);
+  assert.equal(parseStaticConfig({ ...rawConfig(), days: "auto" }).days, "auto");
+  assert.throws(() => parseStaticConfig({ ...rawConfig(), days: 731 }), /too_big|at most/i);
+  assert.throws(() => parseStaticConfig({ ...rawConfig(), days: "automatic" }), /invalid/i);
+});
+
+test("two-year history renders one year of activity within the compact viewBox", () => {
+  const rendered = renderStaticArtifacts(snapshot(730), parseStaticConfig({
+    ...rawConfig(),
+    days: 730,
+    layout: "compact",
+    cards: ["activity"],
+  }));
+  const output = rendered["activity.svg"];
+  const width = Number(/width="(\d+)"/.exec(output)?.[1]);
+  assert.equal(width, 480);
+  let right = 0;
+  let cells = 0;
+  // This fixture has counts 0..4, so every observed day remains a square. Batched
+  // paths may move relatively between squares; measure their actual geometry.
+  for (const path of output.matchAll(/<path\b[^>]*\bdata-cell-count="\d+"[^>]*\bd="([^"]+)"/g)) {
+    let x = 0;
+    for (const move of path[1].matchAll(/([Mm])(-?[\d.]+) (-?[\d.]+)h([\d.]+)v[\d.]+h-[\d.]+z/g)) {
+      x = move[1] === "M" ? Number(move[2]) : x + Number(move[2]);
+      cells += 1;
+      right = Math.max(right, x + Number(move[4]));
+    }
+  }
+  assert.equal(cells, 365);
+  assert.ok(right < width, `compact grid overflows: ${right} of ${width}`);
+});
+
 test("renders wide and compact Atlas variants from one snapshot", () => {
   const rendered = renderStaticArtifacts(snapshot(), parseStaticConfig({
     ...rawConfig(),
@@ -86,10 +131,166 @@ test("renders wide and compact Atlas variants from one snapshot", () => {
   }));
   assert.deepEqual(Object.keys(rendered).sort(), ["atlas-compact.svg", "atlas.svg"]);
   assert.match(rendered["atlas.svg"], /viewBox="0 0 860 380"/);
-  assert.match(rendered["atlas-compact.svg"], /viewBox="0 0 480 570"/);
+  assert.match(rendered["atlas-compact.svg"], /viewBox="0 0 480 608"/);
   const wideDescription = rendered["atlas.svg"].match(/<desc>(.*?)<\/desc>/s)?.[1];
   const compactDescription = rendered["atlas-compact.svg"].match(/<desc>(.*?)<\/desc>/s)?.[1];
   assert.equal(compactDescription, wideDescription);
+});
+
+test("reduced-motion companions are opt-in and validate their boolean config", () => {
+  assert.equal(config().reducedMotion, false);
+  assert.equal(parseStaticConfig({ ...rawConfig(), reducedMotion: true }).reducedMotion, true);
+  for (const reducedMotion of ["true", 1, null]) {
+    assert.throws(() => parseStaticConfig({ ...rawConfig(), reducedMotion }));
+  }
+});
+
+test("reduced-motion companions match still controls for both responsive Atlas layouts and Activity", () => {
+  for (const layout of ["wide", "compact"]) {
+    for (const motion of ["none", "subtle", "ambient", "cinematic"]) {
+      const selected = {
+        ...config(), layout, motion, cards: ["atlas", "activity", "profile"],
+        responsiveAtlas: true, reducedMotion: true,
+      };
+      const base = snapshot(730);
+      const rendered = renderStaticArtifacts(base, selected);
+      const control = renderStaticArtifacts(base, { ...selected, motion: "none", reducedMotion: false });
+      const companion = layout === "wide" ? "compact" : "wide";
+      assert.deepEqual(Object.keys(rendered).sort(), [
+        "activity-still.svg", "activity.svg", `atlas-${companion}-still.svg`, `atlas-${companion}.svg`,
+        "atlas-still.svg", "atlas.svg", "profile.svg",
+      ].sort());
+      for (const [still, ordinary] of [
+        ["atlas-still.svg", "atlas.svg"],
+        [`atlas-${companion}-still.svg`, `atlas-${companion}.svg`],
+        ["activity-still.svg", "activity.svg"],
+      ]) {
+        assert.equal(rendered[still], control[ordinary]);
+        assert.doesNotMatch(rendered[still], /<(?:animate|animateTransform|set)\b|@keyframes/);
+      }
+      assert.equal(rendered["profile.svg"], renderStaticArtifacts(base, { ...selected, reducedMotion: false })["profile.svg"]);
+    }
+  }
+  assert.deepEqual(
+    Object.keys(renderStaticArtifacts(snapshot(), { ...config(), cards: ["profile"], reducedMotion: true })),
+    ["profile.svg"],
+  );
+});
+
+test("reduced-motion companions share their snapshot and verified manifests across themes and dry runs", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "commitatlas-still-pairs-"));
+  try {
+    const selected = {
+      ...config(), days: "auto", motion: "ambient", cards: ["atlas", "activity"],
+      responsiveAtlas: true, reducedMotion: true,
+      themes: [{ theme: "paper", outputDir: "assets/commitatlas/light" }],
+    };
+    const base = snapshot(731);
+    const dry = await generateStaticFromSnapshot({ root, config: selected, snapshot: base, dryRun: true });
+    assert.deepEqual(await readdir(root), []);
+    const result = await generateStaticFromSnapshot({ root, config: selected, snapshot: base });
+    assert.deepEqual(result.manifest, dry.manifest);
+    assert.deepEqual(result.variants[0].manifest, dry.variants[0].manifest);
+    const expected = [
+      "activity-still.svg", "activity.svg", "atlas-compact-still.svg", "atlas-compact.svg", "atlas-still.svg", "atlas.svg",
+    ];
+    for (const target of [result, ...result.variants]) {
+      assert.equal(target.manifest.window.days, 731);
+      assert.equal(target.manifest.generatedAt, base.freshness.generatedAt);
+      assert.deepEqual(target.manifest.artifacts.map(({ path }) => path).sort(), expected);
+      for (const artifact of target.manifest.artifacts) {
+        const bytes = await readFile(path.join(target.outputDir, artifact.path));
+        assert.equal(bytes.byteLength, artifact.bytes);
+        assert.equal(createHash("sha256").update(bytes).digest("hex"), artifact.sha256);
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reduced-motion cleanup removes owned companions while preserving unowned still files", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "commitatlas-still-cleanup-"));
+  try {
+    const selected = {
+      ...config(), cards: ["atlas", "activity"], responsiveAtlas: true, reducedMotion: true,
+    };
+    const output = path.join(root, selected.outputDir);
+    await mkdir(output, { recursive: true });
+    await writeFile(path.join(output, "atlas-wide-still.svg"), "caller-owned still image\n");
+    await generateStaticFromSnapshot({ root, config: selected, snapshot: snapshot() });
+    await generateStaticFromSnapshot({ root, config: { ...selected, reducedMotion: false }, snapshot: snapshot() });
+    assert.deepEqual((await readdir(output)).sort(), [
+      "activity.svg", "atlas-compact.svg", "atlas-wide-still.svg", "atlas.svg", "manifest.json",
+    ]);
+    assert.equal(await readFile(path.join(output, "atlas-wide-still.svg"), "utf8"), "caller-owned still image\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reduced-motion cleanup refuses a companion changed after its previous manifest", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "commitatlas-still-changed-"));
+  try {
+    const selected = { ...config(), cards: ["atlas"], reducedMotion: true };
+    const first = await generateStaticFromSnapshot({ root, config: selected, snapshot: snapshot() });
+    const manifestPath = path.join(first.outputDir, "manifest.json");
+    const previousManifest = await readFile(manifestPath, "utf8");
+    const stillPath = path.join(first.outputDir, "atlas-still.svg");
+    await writeFile(stillPath, "a caller changed this still image\n");
+    await assert.rejects(
+      generateStaticFromSnapshot({ root, config: { ...selected, reducedMotion: false }, snapshot: snapshot() }),
+      /stale artifact atlas-still\.svg no longer matches its prior manifest/,
+    );
+    assert.equal(await readFile(manifestPath, "utf8"), previousManifest);
+    assert.equal(await readFile(stillPath, "utf8"), "a caller changed this still image\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("static refresh can recover a calendar 503 after the hosted twelve-second budget", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "commitatlas-retry-"));
+  let clock = Date.now();
+  t.mock.method(Date, "now", () => clock);
+  let attempts = 0;
+  try {
+    await promisify(execFile)("git", ["init"], { cwd: root, windowsHide: true });
+    await writeFile(path.join(root, ".commitatlas.json"), JSON.stringify({
+      ...rawConfig(), days: 7, cards: ["profile"],
+      projects: [{ repo: "octocat/atlas", label: "Atlas", lifecycle: "active" }],
+    }));
+    await promisify(execFile)("git", ["add", ".commitatlas.json"], { cwd: root, windowsHide: true });
+    const fetchImpl = async (input) => {
+      const url = new URL(input.toString());
+      if (url.origin === "https://github.com") {
+        attempts += 1;
+        if (attempts === 1) {
+          clock += 13_000;
+          return new Response("Backend fetch failed", {
+            status: 503, headers: { "retry-after": new Date(clock + 1_000).toUTCString() },
+          });
+        }
+        const cells = Array.from({ length: 365 }, (_, index) => {
+          const date = new Date(Date.UTC(2026, 0, index + 1)).toISOString().slice(0, 10);
+          return `<td data-date="${date}" data-level="0"></td><tool-tip>No contributions on ${date}.</tool-tip>`;
+        }).join("");
+        return new Response(cells, { headers: { "content-type": "text/html" } });
+      }
+      if (url.pathname.endsWith("/releases/latest")) return new Response("{}", { status: 404 });
+      const payload = url.pathname === "/repos/octocat/atlas"
+        ? { name: "atlas", private: false, default_branch: "main", stargazers_count: 0, forks_count: 0, open_issues_count: 0 }
+        : url.pathname.endsWith("/repos") ? []
+        : { login: "octocat", public_repos: 0, followers: 0, following: 0 };
+      return new Response(JSON.stringify(payload), { headers: { "content-type": "application/json" } });
+    };
+    const result = await generateStatic({ cwd: root, asOf: "2026-08-20", fetchImpl });
+    assert.equal(result.manifest.window.to, "2026-08-20");
+    assert.equal(result.written, true);
+    assert.equal(attempts, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("loads only a tracked, non-symlinked repository config", async () => {
@@ -107,6 +308,17 @@ test("loads only a tracked, non-symlinked repository config", async () => {
   }
 });
 
+test("rejects missing intermediate and final components when mustExist is true", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "commitatlas-contained-"));
+  try {
+    await assert.rejects(resolveContainedPath(root, "no-such-dir/config.json", { mustExist: true, label: "config" }), /config path does not exist/);
+    await assert.rejects(resolveContainedPath(root, "missing.json", { mustExist: true, label: "config" }), /config path does not exist/);
+    assert.equal(await resolveContainedPath(root, "no-such-dir/config.json", { mustExist: false, label: "output" }), path.resolve(root, "no-such-dir/config.json"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("renders all rich widgets deterministically from one snapshot", () => {
   const first = renderStaticArtifacts(snapshot(), config());
   const second = renderStaticArtifacts(snapshot(), config());
@@ -118,7 +330,7 @@ test("renders all rich widgets deterministically from one snapshot", () => {
   assert.match(first["releases.svg"], /LATEST RELEASES/);
   assert.match(first["atlas.svg"], /PUBLIC PROFILE VIEW/);
   assert.match(first["atlas.svg"], /02 \/\/ PROFILE MIX · NOT WINDOW-SCOPED/);
-  assert.match(first["atlas.svg"], /CONTRIBUTION DENSITY/);
+  assert.match(first["atlas.svg"], /CONTRIBUTION CALENDAR/);
   assert.match(first["atlas.svg"], /RHYTHM/);
   assert.match(first["breakdown.svg"], /PUBLIC PROFILE %/);
   assert.match(first["breakdown.svg"], /Annual profile-view percentages · exact window counts unavailable/);
@@ -171,6 +383,141 @@ test("propagates synthetic source truth to every standalone static card", () => 
     assert.match(svg, /<title>Synthetic demo:/, name);
     assert.match(svg, /<desc>Synthetic demonstration data, not live GitHub data\./, name);
   }
+});
+
+test("atlas card uses the same source mapping as every sibling card", () => {
+  const base = snapshot();
+  const withFreshness = (freshness) => ({
+    ...base,
+    profile: { ...base.profile, freshness },
+    contributions: { ...base.contributions, freshness },
+    projects: { ...base.projects, freshness },
+    freshness,
+  });
+  const live = renderStaticArtifacts(base, config());
+  assert.match(live["atlas.svg"], />PUBLIC PROFILE VIEW</);
+  assert.doesNotMatch(live["atlas.svg"], /SYNTHETIC PREVIEW/);
+  assert.doesNotMatch(live["streak.svg"], /SYNTHETIC DEMO/);
+  const githubRest = renderStaticArtifacts(withFreshness({ generatedAt, source: "github-rest", mode: "live" }), config());
+  assert.match(githubRest["atlas.svg"], />PUBLIC GITHUB</);
+  assert.doesNotMatch(githubRest["atlas.svg"], /SYNTHETIC PREVIEW/);
+  assert.doesNotMatch(githubRest["streak.svg"], /SYNTHETIC DEMO/);
+  const demoMode = renderStaticArtifacts(withFreshness({ generatedAt, source: "github-rest", mode: "demo" }), config());
+  assert.match(demoMode["atlas.svg"], /SYNTHETIC PREVIEW/);
+  assert.doesNotMatch(demoMode["atlas.svg"], />PUBLIC GITHUB</);
+  assert.match(demoMode["streak.svg"], />SYNTHETIC DEMO<\/text>/);
+  const syntheticSource = renderStaticArtifacts(withFreshness({ generatedAt, source: "synthetic-demo", mode: "live" }), config());
+  assert.match(syntheticSource["atlas.svg"], /SYNTHETIC PREVIEW/);
+  assert.doesNotMatch(syntheticSource["atlas.svg"], />PUBLIC GITHUB</);
+  assert.match(syntheticSource["streak.svg"], />SYNTHETIC DEMO<\/text>/);
+});
+
+test("propagates degraded freshness truth to every static card", () => {
+  const base = snapshot();
+  const withFreshness = (freshness) => ({
+    ...base,
+    profile: { ...base.profile, freshness },
+    contributions: { ...base.contributions, freshness },
+    projects: { ...base.projects, freshness },
+    freshness,
+  });
+  const cases = [
+    { mode: "partial", marker: "PARTIAL SNAPSHOT", title: "Partial snapshot:", description: "Partially observed public GitHub data" },
+    { mode: "stale", marker: "STALE SNAPSHOT", title: "Stale snapshot:", description: "Stale public GitHub data" },
+    { mode: "unavailable", marker: "DATA UNAVAILABLE", title: "Data unavailable:", description: "Public GitHub data was unavailable" },
+  ];
+  const standalone = [
+    "profile.svg", "streak.svg", "activity.svg", "breakdown.svg", "rhythm.svg",
+    "languages.svg", "projects.svg", "cadence.svg", "releases.svg",
+  ];
+
+  for (const expected of cases) {
+    const rendered = renderStaticArtifacts(withFreshness({
+      generatedAt, source: "github-rest", mode: expected.mode,
+    }), config());
+    assert.match(rendered["atlas.svg"], new RegExp(`>${expected.marker}<`), expected.mode);
+    assert.match(rendered["atlas.svg"], new RegExp(`<title>${expected.title}`), expected.mode);
+    assert.match(rendered["atlas.svg"], new RegExp(`<desc>${expected.description}`), expected.mode);
+    for (const name of standalone) {
+      assert.match(rendered[name], new RegExp(`>${expected.marker}<`), `${expected.mode}: ${name}`);
+      assert.match(rendered[name], new RegExp(`<title>${expected.title}`), `${expected.mode}: ${name}`);
+      assert.match(rendered[name], new RegExp(`<desc>${expected.description}`), `${expected.mode}: ${name}`);
+    }
+  }
+});
+
+test("a truncated repository list marks the static atlas partial and omits the partial star total", () => {
+  const base = snapshot();
+  const rendered = renderStaticArtifacts({
+    ...base,
+    profile: { ...base.profile, repositoriesTruncated: true, stars: 999 },
+  }, parseStaticConfig({ ...rawConfig(), cards: ["atlas"] }));
+  assert.match(rendered["atlas.svg"], />PARTIAL SNAPSHOT</);
+  assert.match(rendered["atlas.svg"], /Partially observed public GitHub data/);
+  assert.doesNotMatch(rendered["atlas.svg"], />999</);
+});
+
+test("a truncated repository list skips the languages card instead of aborting generation", async () => {
+  const base = snapshot();
+  const truncated = { ...base, profile: { ...base.profile, repositoriesTruncated: true } };
+  const rendered = renderStaticArtifacts(truncated, config());
+  assert.ok(!("languages.svg" in rendered), "truncated output must omit languages.svg");
+  assert.ok("profile.svg" in rendered);
+  assert.ok("activity.svg" in rendered);
+  assert.ok("languages.svg" in renderStaticArtifacts(base, config()));
+  const root = await mkdtemp(path.join(os.tmpdir(), "commitatlas-truncated-"));
+  try {
+    const dry = await generateStaticFromSnapshot({ root, config: config(), snapshot: truncated, dryRun: true });
+    assert.ok(dry.manifest.artifacts.every((artifact) => artifact.path !== "languages.svg"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a stale contribution window stays stale when the repository list is truncated", () => {
+  const base = snapshot();
+  const rendered = renderStaticArtifacts({
+    ...base,
+    profile: { ...base.profile, repositoriesTruncated: true },
+    contributions: { ...base.contributions, freshness: { ...base.contributions.freshness, mode: "stale" } },
+    freshness: { ...base.freshness, mode: "stale" },
+  }, parseStaticConfig({ ...rawConfig(), cards: ["atlas"] }));
+  assert.match(rendered["atlas.svg"], />STALE SNAPSHOT</);
+  assert.doesNotMatch(rendered["atlas.svg"], />PARTIAL SNAPSHOT</);
+});
+
+test("a partial project board marks the static atlas card partial and leaves contribution cards live", () => {
+  const base = snapshot();
+  const rendered = renderStaticArtifacts({
+    ...base,
+    projects: {
+      ...base.projects,
+      freshness: { ...base.projects.freshness, mode: "partial" },
+      projects: [{
+        ...base.projects.projects[0],
+        ci: { ...base.projects.projects[0].ci, state: "unavailable", label: "CI unavailable" },
+      }],
+    },
+  }, config());
+  assert.match(rendered["atlas.svg"], />PARTIAL SNAPSHOT</);
+  assert.match(rendered["atlas.svg"], /0\/1 CI passing · 0 attention · 1 unavailable/);
+  assert.doesNotMatch(rendered["streak.svg"], />PARTIAL SNAPSHOT</);
+  assert.doesNotMatch(rendered["activity.svg"], />PARTIAL SNAPSHOT</);
+});
+
+test("an unrecognized project CI state is counted as unavailable in the static atlas, not dropped from every bucket", () => {
+  const base = snapshot();
+  const rendered = renderStaticArtifacts({
+    ...base,
+    projects: {
+      ...base.projects,
+      projects: [{
+        ...base.projects.projects[0],
+        ci: { ...base.projects.projects[0].ci, state: "bogus", label: "CI bogus" },
+      }],
+    },
+  }, config());
+  assert.match(rendered["atlas.svg"], /0\/1 CI passing · 0 attention · 1 unavailable/);
 });
 
 test("preserves the declared planned lifecycle in static project SVGs", () => {
@@ -412,6 +759,40 @@ test("validates every theme output before writing the primary directory", async 
   }
 });
 
+test("rejects duplicate resolved theme output directories before writing anything", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "commitatlas-theme-collision-"));
+  try {
+    const parsedConfigWithPaperVariantAt = (outputDir) => parseStaticConfig({
+      ...rawConfig(),
+      themes: [{ theme: "paper", outputDir }],
+    });
+    const colliding = {
+      ...parsedConfigWithPaperVariantAt("assets/commitatlas/light"),
+      outputDir: "assets/commitatlas/light",
+    };
+    await assert.rejects(
+      generateStaticFromSnapshot({ root, config: colliding, snapshot: snapshot() }),
+      /unique outputDir/,
+    );
+    assert.deepEqual(await readdir(root), [], "nothing may be created under the root");
+    await assert.rejects(
+      generateStaticFromSnapshot({ root, config: colliding, snapshot: snapshot(), dryRun: true }),
+      /unique outputDir/,
+    );
+    const caseOnly = {
+      ...parsedConfigWithPaperVariantAt("assets/commitatlas/light"),
+      outputDir: "ASSETS/commitatlas/light",
+    };
+    await assert.rejects(
+      generateStaticFromSnapshot({ root, config: caseOnly, snapshot: snapshot() }),
+      /unique outputDir/,
+    );
+    assert.deepEqual(await readdir(root), [], "nothing may be created under the root");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("wraps untrusted release tags and workflow names in delimiter-safe code spans", () => {
   const hostileTags = [
     "v1.0-`code`",
@@ -619,6 +1000,7 @@ test("keeps the ownership record recoverable when cleanup is interrupted", async
     const withoutCatalog = parseStaticConfig({ ...rawConfig(), cards: ["atlas"] });
     await generateStaticFromSnapshot({ root, config: withCatalog, snapshot: snapshot() });
     const ownedManifest = await readFile(path.join(output, "manifest.json"), "utf8");
+    const ownedMarkdown = await readFile(path.join(output, "projects.md"));
 
     // Interrupt cleanup for real: a non-recursive rm over a directory throws, so the run aborts
     // partway through stale collection. The manifest must still be the one that records ownership.
@@ -628,9 +1010,9 @@ test("keeps the ownership record recoverable when cleanup is interrupted", async
     await assert.rejects(generateStaticFromSnapshot({ root, config: withoutCatalog, snapshot: snapshot() }));
     assert.equal(await readFile(path.join(output, "manifest.json"), "utf8"), ownedManifest);
 
-    // A crash anywhere in that window leaves the same state, so the next good run finishes the job.
+    // Restoring the exact recorded bytes makes the interrupted cleanup safe to retry.
     await rm(path.join(output, "projects.md"), { recursive: true, force: true });
-    await writeFile(path.join(output, "projects.md"), "stale catalog CommitAtlas wrote\n");
+    await writeFile(path.join(output, "projects.md"), ownedMarkdown);
     await generateStaticFromSnapshot({ root, config: withoutCatalog, snapshot: snapshot() });
     assert.deepEqual((await readdir(output)).sort(), ["atlas.svg", "manifest.json"]);
   } finally {
@@ -730,8 +1112,8 @@ function config() {
   return parseStaticConfig(rawConfig());
 }
 
-function snapshot() {
-  const days = Array.from({ length: 365 }, (_, index) => {
+function snapshot(dayCount = 365) {
+  const days = Array.from({ length: dayCount }, (_, index) => {
     const date = new Date(Date.UTC(2025, 7, 21 + index)).toISOString().slice(0, 10);
     const count = index % 5;
     return { date, count, level: count };

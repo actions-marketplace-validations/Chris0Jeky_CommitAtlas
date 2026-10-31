@@ -93,8 +93,10 @@ anonymous aggregates the account owner elected to display, but it exposes no pri
 details to CommitAtlas. Activity type data from calendar-year profile views is carried as
 public-profile percentages and labelled as not window-scoped unless an exact categorized source is
 present; a percentage is never rendered as an exact count. Rhythm is a
-within-window personal consistency summary, not a GitHub rank. `motion: "none"` produces no
-animation keyframes; `motion: "subtle"` produces short load motion with a reduced-motion override.
+within-window personal consistency summary, not a GitHub rank. Static configuration accepts
+`motion: "none" | "subtle" | "ambient" | "cinematic"` and defaults to `none`. `none` produces no
+animation keyframes. The other three profiles currently produce the same bounded load motion with a
+reduced-motion override; differentiated ambient and cinematic compilation remains a later slice.
 A malformed, incomplete, gapped, oversized, or unavailable response fails generation.
 
 ## Output semantics
@@ -167,3 +169,100 @@ and the canonical GPL-3.0-only licence. npm registry publication remains a separ
 - npm publication and a stable moving Action tag.
 
 Those are future product decisions, not behavior implied by v1.
+
+## Registered scene delivery
+
+Static config v1 accepts additive `scenes`, `scenePack`, and `identity` fields. Omitted
+`scenes` means `[]`, so existing configs retain their artifact lists. `scenePack`
+defaults to `survey`; the other recognized packs are `orbital`, `spectral`, and
+`terminal`, but a selected definition must actually support the chosen pack and
+motion profile. There are at most 32 selected, unique, registered scene IDs.
+The first production definition is `evidence-coverage` (survey, none/subtle/ambient).
+It is opt-in; the integration example remains test-only. See
+[EVIDENCE_COVERAGE_SCENE.md](EVIDENCE_COVERAGE_SCENE.md) for its exact source mapping.
+
+```json
+{
+  "scenes": [],
+  "scenePack": "survey",
+  "identity": {
+    "name": "Synthetic owner",
+    "tagline": "A static, owner-supplied introduction",
+    "focus": ["Software", "Automation"]
+  }
+}
+```
+
+These fields extend an existing complete configuration; this fragment is not a
+standalone config. Identity requires a nonempty name (at most 40 UTF-16 code units),
+optional nonempty tagline (80), and up to three nonempty focus strings (24 each).
+Omitted focus becomes an empty list. Unknown fields, accessors and sparse arrays
+are rejected. The SVG adapter `createIdentityConfig` detaches and freezes the
+validated value. Plain objects or clones passed directly to the scene engine do
+not retain validation provenance. Identity is static input only, not a hosted
+query parameter, projection authorization or additional GitHub data request.
+
+Selecting `identity-beacon` requires this validated identity. Its focus strings match configured
+`projects[].label` values exactly. The static adapter associates each label with its observed
+project by the complete repository identity, using the existing case-insensitive GitHub slug
+canonicalization. It copies the Beacon input without renaming the shared snapshot used by cards
+or other scenes. Up to three matched projects become bodies; unmatched focus remains plain text.
+A focus string naming more than one configured label is rejected as ambiguous. Duplicate labels
+outside the selected focus do not prevent a unique match. Unknown, duplicate or malformed
+observed repository identities make the Beacon unavailable rather than borrowing another
+project's count. The [Beacon evidence guide](./IDENTITY_BEACON_EVIDENCE.md) separates these static
+adapter regressions from synthetic direct-image browser qualification.
+
+Each selected definition produces `scene-<id>.svg` from the **same portfolio
+snapshot** in the primary output and every configured theme variant. Layout and
+motion use the existing scene engine, size/accessibility checks and provisional
+backend policies. Unsupported definitions fail before publication. All themes
+are rendered before the first write; the existing writer's bounded failure and
+crash-recovery limitations are unchanged. Manifests remain version 1 and hash the
+scene bytes alongside cards. A dry-run lists the same artifacts without writing.
+
+Opting into `reducedMotion: true` adds a `motion: "none"` twin for every selected scene in every
+theme, named `scene-<id>.still.svg`. The ordinary and still render reuse the same validated inputs,
+snapshot, pack, theme, layout, backend and namespace. Scene IDs cannot contain dots, so the new
+namespace cannot collide with ordinary definitions whose ID ends in `-still`. The 48-character
+ID limit still applies, giving a maximum companion filename length of 64 characters. Unsupported
+`none` profiles fail before publication. Omitting or disabling `reducedMotion` keeps the prior
+inventory; enabling it with no scenes adds no scene files. C0 validation, stale/unavailable
+disclosures and the C1 publication prohibition are unchanged.
+
+The Action output `scenes` is a JSON array of repository-relative paths, ordered
+by the primary output then variants and each manifest's artifact ordering.
+It is `[]` for legacy configurations and also works in dry-run. Programmatic
+consumers can use `generatedScenePaths(result)` for the identical path contract.
+This existing output excludes still twins. The separate `scene-stills` output and
+`generatedSceneStillPaths(result)` follow the same ordering and containment checks for companions,
+returning `[]` when they are absent. The Action also declares `atlas-still`, `atlas-compact-still`,
+`atlas-wide-still`, and `activity-still` for the corresponding primary-theme card paths; each is
+an empty string when absent. Dry-run reports planned output paths without writing or deleting.
+
+Canonical `scene-<id>.svg` and `scene-<id>.still.svg` filenames are reserved generated names within an output
+directory. Stale cleanup never scans a wildcard: the prior CommitAtlas manifest
+must claim that exact canonical name with a bounded byte length and SHA-256.
+This also handles a retired scene no longer in the registry. Unclaimed files,
+malformed scene entries and traversal names do not authorize scene deletion.
+Existing symlink/containment and cross-theme preflight checks still apply.
+
+**Profile consumers with an exact artifact allowlist must add the selected
+`scene-<id>.svg` and opted-in `scene-<id>.still.svg` entries before enabling scenes.** Merely enabling a broad wildcard
+is not a substitute for reviewing the chosen definitions. Source tests and static
+rendering are not evidence that GitHub/Camo supports a motion backend.
+
+Scene delivery uses `MOTION_BACKEND_DEFAULTS["github-readme"]` rather than
+forcing the web/CSS backend. That policy is still provisional; it is not
+browser qualification, and consumers remain responsible for the existing
+reduced-motion/none-twin delivery requirements. Validated scene artifacts
+use the engine's scene byte ceiling (currently 120 KiB); individual scene
+definitions may impose smaller budgets. Existing fixed-card and text
+limits are unchanged. Prior scene ownership entries use the same ceiling
+so a valid large scene or still companion remains eligible for cleanup when disabled.
+
+The inactive publication-v2 planner and recovery codec accept the same canonical companion names.
+A complete turnover now requires 149 operations per theme: the fixed inventory, 32 retired and
+32 new scenes, their still twins, and the manifest. Its bound is 160 operations and 256 KiB per
+four-theme journal, with a separate 96-entry bound on each declared generation. These are test-only
+planning limits; production continues to use the existing integrity-aware v1 publisher.

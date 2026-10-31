@@ -1,6 +1,7 @@
 import {
   calculateContributionMetrics,
   parseContributionCalendar,
+  selectContributionDisplayCalendar,
 } from "@/packages/core/src/index";
 import { GitHubClient, GitHubApiError } from "./github/client";
 import { demoContributions, demoProfile, demoProjects } from "./github/demo";
@@ -12,11 +13,11 @@ import type {
   ProjectLifecycle,
   ProjectWorkflow,
 } from "./github/types";
-import type { AtlasCardData } from "@/packages/svg/src/index";
+import type { AtlasCardData, CardDataState, CardSource } from "@/packages/svg/src/index";
 
 export interface PortfolioRequest {
   user: string;
-  days: number;
+  days: number | "auto";
   demo: boolean;
   token?: string;
   repositories?: readonly string[];
@@ -61,7 +62,12 @@ export function assemblePortfolioSnapshot(
   if (profile.login.toLowerCase() !== contributions.login.toLowerCase()) {
     throw new GitHubApiError("invalid_response", "Portfolio sources refer to different GitHub users");
   }
-  const calendar = parseContributionCalendar({ version: 1, days: contributions.days });
+  let calendar: ReturnType<typeof parseContributionCalendar>;
+  try {
+    calendar = parseContributionCalendar({ version: 1, days: contributions.days });
+  } catch {
+    throw new GitHubApiError("invalid_response", "GitHub returned an invalid contribution calendar");
+  }
   const asOf = calendar.days.at(-1)?.date;
   if (!asOf) throw new GitHubApiError("invalid_response", "GitHub returned an empty contribution calendar");
   const metrics = calculateContributionMetrics(calendar, {
@@ -91,12 +97,37 @@ export function assemblePortfolioSnapshot(
   };
 }
 
+function toCardEvidence(
+  freshness: PortfolioSnapshot["freshness"],
+): { readonly source: CardSource; readonly dataState?: CardDataState } {
+  const source: CardSource = freshness.mode === "demo" || freshness.source === "synthetic-demo"
+    ? "synthetic-demo"
+    : freshness.source === "github-profile-html" ? "public-profile" : "public-github";
+  const dataState = degradedMode(freshness.mode);
+  return { source, ...(dataState ? { dataState } : {}) };
+}
+
+function degradedMode(mode: string | undefined): CardDataState | undefined {
+  return mode === "partial" || mode === "stale" || mode === "unavailable" ? mode : undefined;
+}
+
+/** Atlas draws project CI on the same card as the contribution window, so a worse board must show. */
+function worseCardState(contribution: string | undefined, board: string | undefined): CardDataState | undefined {
+  const rank = (mode: string | undefined) => mode === "unavailable" ? 3 : mode === "stale" ? 2 : mode === "partial" ? 1 : 0;
+  return degradedMode(rank(board) > rank(contribution) ? board : contribution);
+}
+
 export function toAtlasCard(snapshot: PortfolioSnapshot): AtlasCardData {
   const { profile, contributions, metrics, projects } = snapshot;
   const projectStates = projects?.projects ?? [];
+  const evidence = toCardEvidence(snapshot.freshness);
+  const dataState = worseCardState(
+    worseCardState(snapshot.freshness.mode, projects?.freshness.mode),
+    profile.repositoriesTruncated ? "partial" : undefined,
+  );
   const passing = projectStates.filter((project) => project.ci.state === "passing").length;
   const attention = projectStates.filter((project) => project.ci.state === "failing" || project.ci.state === "pending" || project.ci.state === "stale").length;
-  const unavailable = projectStates.filter((project) => project.ci.state === "unavailable" || project.ci.state === "unconfigured").length;
+  const unavailable = projectStates.length - passing - attention;
   return {
     profile: {
       name: profile.name?.trim() || profile.login,
@@ -126,14 +157,13 @@ export function toAtlasCard(snapshot: PortfolioSnapshot): AtlasCardData {
       direction: metrics.trend.direction,
     },
     rhythm: metrics.rhythm,
-    activity: contributions.days,
+    activity: selectContributionDisplayCalendar({ version: 1, days: contributions.days }).days,
     ...(profile.repositoriesTruncated ? {} : {
       languages: profile.primaryLanguages.map((language) => ({ name: language.name, percentage: language.share })),
     }),
     ...(projects ? { projects: { total: projectStates.length, passing, attention, unavailable } } : {}),
     generatedAt: snapshot.freshness.generatedAt,
-    source: snapshot.freshness.mode === "demo" ? "synthetic-demo"
-      : snapshot.freshness.source === "github-profile-html" ? "public-profile"
-        : "public-github",
+    source: evidence.source,
+    ...(dataState ? { dataState } : {}),
   };
 }

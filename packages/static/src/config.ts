@@ -1,19 +1,28 @@
 import { execFile } from "node:child_process";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import { devNull } from "node:os";
 import { promisify } from "node:util";
 import {
   parseHandle,
   parseManifest,
   type ProjectManifest,
 } from "@commit-atlas/core";
+import type { IdentityConfig, MotionProfile, ScenePack } from "@commit-atlas/svg";
+import { MAX_STATIC_SCENES, STATIC_SCENE_PACKS, staticSceneOptions } from "./scene-config.js";
 import { z } from "zod";
+import { configuredBeaconLabels } from "./beacon-input.js";
 
 export const STATIC_CARD_NAMES = [
   "atlas", "profile", "streak", "activity", "breakdown", "rhythm", "languages", "projects",
-  "cadence", "releases",
+  "cadence", "releases", "delivery",
 ] as const;
 export type StaticCardName = (typeof STATIC_CARD_NAMES)[number];
+
+const DEFAULT_STATIC_CARD_NAMES: readonly StaticCardName[] = [
+  "atlas", "profile", "streak", "activity", "breakdown", "rhythm", "languages", "projects",
+  "cadence", "releases",
+];
 
 export const STATIC_THEME_NAMES = ["aurora", "midnight", "paper", "ember"] as const;
 export type StaticThemeName = (typeof STATIC_THEME_NAMES)[number];
@@ -38,13 +47,18 @@ const RawStaticConfigSchema = z.object({
     theme: z.enum(STATIC_THEME_NAMES),
     outputDir: RelativePathSchema,
   }).strict()).max(3).default([]),
-  days: z.number().int().min(7).max(365).default(365),
-  motion: z.enum(["none", "subtle"]).default("none"),
+  days: z.union([z.number().int().min(7).max(730), z.literal("auto")]).default(365),
+  motion: z.enum(["none", "subtle", "ambient", "cinematic"]).default("none"),
   layout: z.enum(["wide", "compact"]).default("wide"),
   responsiveAtlas: z.boolean().default(false),
+  reducedMotion: z.boolean().default(false),
   outputDir: RelativePathSchema,
-  cards: z.array(z.enum(STATIC_CARD_NAMES)).min(1).max(STATIC_CARD_NAMES.length).default([...STATIC_CARD_NAMES]),
+  cards: z.array(z.enum(STATIC_CARD_NAMES)).min(1).max(STATIC_CARD_NAMES.length).default([...DEFAULT_STATIC_CARD_NAMES]),
   projects: z.array(z.unknown()).min(1).max(6),
+  scenes: z.array(z.string().max(48)).max(MAX_STATIC_SCENES).default([]),
+  scenePack: z.enum(STATIC_SCENE_PACKS).default("survey"),
+  identity: z.unknown().optional(),
+  lens: z.object({ path: RelativePathSchema, maxAgeDays: z.number().int().min(1).max(3650).default(45) }).strict().optional(),
 }).strict();
 
 export interface StaticConfig {
@@ -52,13 +66,19 @@ export interface StaticConfig {
   readonly user: string;
   readonly theme: StaticThemeName;
   readonly themes: readonly StaticThemeVariant[];
-  readonly days: number;
-  readonly motion: "none" | "subtle";
+  readonly days: number | "auto";
+  readonly motion: MotionProfile;
   readonly layout: "wide" | "compact";
   readonly responsiveAtlas: boolean;
+  /** Emit motion:none companions for selected Atlas, Activity and scene outputs. Defaults to false. */
+  readonly reducedMotion?: boolean;
   readonly outputDir: string;
   readonly cards: readonly StaticCardName[];
   readonly projects: ProjectManifest["projects"];
+  readonly scenes?: readonly string[];
+  readonly scenePack?: ScenePack;
+  readonly lens?: { readonly path: string; readonly maxAgeDays: number };
+  readonly identity?: Pick<IdentityConfig, "name" | "tagline"> & { readonly focus?: readonly string[] };
 }
 
 export interface StaticThemeVariant {
@@ -74,6 +94,7 @@ export interface LoadedStaticConfig {
 
 export function parseStaticConfig(input: unknown): StaticConfig {
   const raw = RawStaticConfigSchema.parse(input);
+  const sceneOptions = staticSceneOptions(raw);
   const cards = [...new Set(raw.cards)];
   if (cards.length !== raw.cards.length) throw new Error("cards must not contain duplicates");
   if (raw.responsiveAtlas && !cards.includes("atlas")) {
@@ -100,6 +121,9 @@ export function parseStaticConfig(input: unknown): StaticConfig {
   if (manifest.projects.some((project) => project.repo.split("/")[0]?.toLowerCase() !== user)) {
     throw new Error("Every v1 static project must be owned by the configured user");
   }
+  if (sceneOptions.identity && sceneOptions.definitions.some(({ id }) => id === "identity-beacon")) {
+    configuredBeaconLabels(manifest.projects, sceneOptions.identity.focus);
+  }
   return {
     version: 1,
     user,
@@ -109,9 +133,14 @@ export function parseStaticConfig(input: unknown): StaticConfig {
     motion: raw.motion,
     layout: raw.layout,
     responsiveAtlas: raw.responsiveAtlas,
+    reducedMotion: raw.reducedMotion,
     outputDir,
     cards,
     projects: manifest.projects,
+    scenes: sceneOptions.definitions.map(({ id }) => id),
+    scenePack: sceneOptions.pack,
+    ...(raw.lens ? { lens: { path: raw.lens.path.replaceAll("\\", "/"), maxAgeDays: raw.lens.maxAgeDays } } : {}),
+    ...(sceneOptions.identity ? { identity: sceneOptions.identity } : {}),
   };
 }
 
@@ -142,7 +171,7 @@ export async function resolveContainedPath(
   }
   const target = path.resolve(root, relativePath);
   assertInside(root, target, options.label);
-  await assertNoSymlinkComponents(root, target, options.mustExist);
+  await assertNoSymlinkComponents(root, target, options.mustExist, options.label);
   return target;
 }
 
@@ -153,7 +182,7 @@ function assertInside(root: string, target: string, label: string): void {
   }
 }
 
-async function assertNoSymlinkComponents(root: string, target: string, mustExist: boolean): Promise<void> {
+async function assertNoSymlinkComponents(root: string, target: string, mustExist: boolean, label: string): Promise<void> {
   const relative = path.relative(root, target);
   const parts = relative.split(path.sep);
   let current = root;
@@ -164,17 +193,25 @@ async function assertNoSymlinkComponents(root: string, target: string, mustExist
       if (metadata.isSymbolicLink()) throw new Error("Repository paths must not traverse symbolic links");
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" && (!mustExist || index < parts.length - 1)) return;
+      if (code === "ENOENT") {
+        if (!mustExist) return;
+        throw new Error(`${label} path does not exist`);
+      }
       throw error;
     }
   }
 }
 
-async function assertTracked(root: string, file: string): Promise<void> {
+export async function assertTracked(root: string, file: string): Promise<void> {
   const relative = path.relative(root, file).replaceAll("\\", "/");
   try {
-    await promisify(execFile)("git", ["-C", root, "ls-files", "--error-unmatch", "--", relative], {
-      windowsHide: true,
+    // A caller's alternate index/repository/config cannot prove this worktree's tracking.
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const key of Object.keys(env)) if (key.toUpperCase().startsWith("GIT_")) delete env[key];
+    env.GIT_CONFIG_NOSYSTEM = "1";
+    env.GIT_CONFIG_GLOBAL = devNull;
+    await promisify(execFile)("git", ["-C", root, "--literal-pathspecs", "ls-files", "--error-unmatch", "--", relative], {
+      windowsHide: true, env,
     });
   } catch {
     throw new Error("config must be tracked by the current Git repository");

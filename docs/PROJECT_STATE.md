@@ -1,16 +1,532 @@
 # CommitAtlas project state
 
-Last verified: 2026-08-30 (v0.4.0 released, production and profile evidence current)
+Release/profile receipt last verified: 2026-10-29 (renderer #452 deployed; profile #21 refreshed successfully; scene adoption remains in progress)
 
 This is the authoritative checkpoint for the public demonstration. Git, hosted CI, Cloudflare
 deployment state, and the live profile outrank this file after any ref or deployment moves.
+
+## Static scene still companions — 2026-10-29
+
+The static source extends opt-in `reducedMotion` to every selected registered scene in each theme.
+`scene-<id>.still.svg` shares the ordinary scene's snapshot and validated presentation inputs with
+`motion: "none"`; the dot separates companions from legal IDs ending in `-still`. The Action keeps
+`scenes` unchanged and exposes a separate `scene-stills` aggregate plus four explicit Atlas/Activity
+still outputs. Both enabled and disabled output contracts are exercised against the rebuilt Action,
+including planned paths during dry-run. All seven built-ins match their exact none controls across
+themes, layouts and supported profiles. Ownership checks preserve foreign or changed companions,
+and a scene without none support fails before publication.
+
+The inactive publication-v2 planner and codec also recognize the strict companion namespace.
+Their 160-operation / 256 KiB journal bounds cover a complete 149-operation scene-and-still turnover
+in four themes; the per-generation inventory bound stays 96. Production remains on the v1 writer.
+The [static delivery contract](./STATIC_GENERATOR_PLAN.md#registered-scene-delivery) records the
+filename, Action output and consumer-allowlist changes. This source checkpoint advances the
+producer prerequisite for #144; profile scene adoption and browser qualification remain separate.
+C1 publication stays disabled under Q-9 No.
+
+## Profile calendar, density and refresh work — 2026-10-29
+
+The profile freeze was traced to its committed-asset workflow: it still pinned producer
+`5cb95cd` and seven scheduled runs failed after the successful Sunday snapshot of 25 October.
+[Profile #21](https://github.com/Chris0Jeky/Chris0Jeky/pull/21) now pins merged producer `2c2a1af`,
+adopts its bounded public-calendar retry and static 30-second deadline, and removes the public
+PushEvent gate. The automatic [refresh 40809039152](https://github.com/Chris0Jeky/Chris0Jeky/actions/runs/40809039152)
+passed generation, complete paired validation and publication. Commit `08de8a2` carries the
+`2026-10-29T02:54:02.646Z` snapshot: 730 observed days, a 365-day grid and a 596-day current/longest
+streak. Failed generation continues to preserve the last committed assets. The new failure
+regression checks the executed Action bundle and its classified, sanitized diagnostics.
+
+Live profile inspection separately found the old Sunday SVG still displayed behind its unchanged
+image URL; a content-versioned URL immediately displayed the new snapshot. The follow-up
+[profile #22](https://github.com/Chris0Jeky/Chris0Jeky/pull/22) versions owned URLs from manifest
+hashes and checks README reproducibility. That observation establishes a stale image cache key,
+not a cache TTL or a completed GitHub/Camo transport qualification.
+
+Atlas and Activity now separate the latest 365-day display window from full observed history.
+The display includes its actual end date and annual readings; the header and streaks retain the
+longer history. Copper, gold and violet tiers use absolute daily thresholds, increasing contrast
+and distinct shapes. Six deterministic original vector glyphs distinguish days above 1,500.
+Atlas compiles three bounded ambient decorative groups and Activity two, using SMIL by default;
+`none`, stale, unavailable and zero-activity outputs remain still. Opt-in `reducedMotion` static
+companions share each snapshot and its integrity manifest. The [density guide](./CONTRIBUTION_DENSITY.md)
+records the design and the direct-image browser harness's scope.
+
+Independent source review found and resolved a cropped-calendar partial-total error, verified
+80 exact still-geometry comparisons and 72 rejected motion mutations, and found no remaining
+blocking issue. [#452](https://github.com/Chris0Jeky/CommitAtlas/pull/452) merged as `2c2a1af` after
+the complete 2,090-test gate and exact-head [CI 40807674405](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40807674405).
+The [density browser run](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40807674398) at
+`b9099fb` passes 64 measured layouts and 24 playback/control rows in pinned Chromium 143.0.7499.4.
+All 72 pixel comparisons and 160 PNG/SVG hashes were independently recomputed; eight ambient rows
+move and return exactly to their still controls, and all reduced-motion frames match the still
+control. The [canonical receipt](./evidence/profile-density-2026-10-29/README.md) records provenance
+and limits. The merged [main CI](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40808392149)
+passes; [Deploy 40808696362](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40808696362)
+then passes all 21 deployed-origin checks with expected build `2c2a1af`.
+This work advances #126, #127 and #144; it does not complete their broader acceptance criteria or
+the #113/#180 transport matrix.
+
+[Dependency repair #451](https://github.com/Chris0Jeky/CommitAtlas/pull/451) merged as `6ef6666`,
+closing #447. Its complete local gate passed 2,058 tests and
+[PR CI 40806311483](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40806311483) passed.
+Both full-toolchain and production audits report zero findings at the recorded observation.
+The [audit evidence](./evidence/dependency-audit-2026-10-29/README.md) preserves before/after reports,
+paths and digests. CI now also checks the full installed toolchain for high-severity advisories
+and explicitly checks out the immutable PR head; successful main pushes remain the deployment gate.
+
+## Appearance integration and Developer Signature — 2026-10-26
+
+**Gallery and Studio appearance.** [#448](https://github.com/Chris0Jeky/CommitAtlas/pull/448)
+merged as `c72c3b2`. Its [quality gate](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40400659828)
+passes 2030 tests. The separate [browser run](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40400659546)
+passes six Gallery layouts, 14 Studio scenarios, 48 control checks and 16 keyboard cases. These
+receipts qualify that appearance change; they do not establish Signature playback, a completed
+GitHub/Camo matrix or profile adoption. The merged build then passed all 21 deployed-origin checks
+in [Deploy 40401782765](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40401782765).
+Live inspection confirmed the redesigned Gallery and Replay retaining focus through image decode.
+
+**Developer Signature (#147).** [#449](https://github.com/Chris0Jeky/CommitAtlas/pull/449) merged
+as `d4c9075`, completing the bounded C0 scene acceptance. The first `signature` family scene
+consumes the complete validated synthetic C0 Lens projection, with a six-axis
+radar, exact readings, producer archetype, top-two dimensions, and complete derived coverage,
+warnings, privacy and freshness. Both widths and all themes support `survey` with `none | ambient`.
+Historical projections stay still; expired inputs become unavailable before model construction.
+Gallery evidence stays Derived while freshness is separately Ready, Stale or Unavailable.
+The [scene guide](./SIGNATURE_SCENE.md) records the layout, interpretation and capture contract.
+The initial feature tree `13492df` passed typecheck, lint, 685 SVG tests, 361 static tests, 107 chassis tests,
+100 built-product tests and 23 discovery tests. The range-spacing follow-up `1dd7339` clears measured
+emoji ink boxes and passes all 686 SVG tests, typecheck and lint. Static paired artifacts carry
+verified bytes and SHA-256 manifests. The rebuilt Action is independently exercised for fresh
+ambient, stale, expired and dry-run paired outputs. Its 950189-byte bundle has SHA-256
+`0531a45effe483dfe656760015ed688503465448b2b53ab1714473c741e6b889`.
+The final [quality gate](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40403676106) passes
+2,058 tests, the clean Action rebuild comparison and a zero-vulnerability production audit.
+The clean native-head [Signature browser run](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40403676250)
+passes 312 measured layouts and 14 CSS/SMIL playback/control rows, including exact equality with
+the still control at the final observation requested for 46s. Its report binds 22 source and 37
+built-module hashes; all 50 pixel comparisons and 108 PNG/SVG/WebM hashes were independently
+checked. The [canonical receipt](./SIGNATURE_EVIDENCE.md) preserves actual font selections, times,
+archive identities and scope. The earlier [visual references](./evidence/appearance-2026-10-26/README.md)
+retain their own development provenance.
+No hosted Signature route or Studio selection is enabled. C1/profile
+publication remains disabled under #170 / Q-9 No.
+
+**Appearance follow-up.** The clean native-head
+[appearance run](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40403676093) passes six
+Gallery layouts with 18 tiles and 14 Studio scenarios. All 48 preview controls are reached by Tab;
+16 keyboard cases retain focus through loading and completion. Twelve group measurements confirm
+20px from preceding controls and 9px from legends to choices at desktop/mobile widths. Gallery
+captures wait for finite theme transitions to settle, and historical cards carry a Stale badge.
+The [768px Limestone capture](./evidence/appearance-2026-10-26/README.md#current-gallery-after-signature)
+is retained with its clean-head provenance and hash.
+
+The merged [main CI](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40404357062) passes.
+[Deploy 40404740015](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40404740015/job/121859468441)
+then passed all 21 deployed-origin checks at `2026-10-26T21:29:47.5524278Z`, with merge `d4c9075`
+declared as the expected build at `https://commit-atlas.commit-atlas.workers.dev`. Subsequent live
+inspection found 18 Gallery outputs and a still, derived Signature labelled Stale (54 days at that
+observation), retaining the September 1 fixture timestamp. Studio's six configuration groups kept
+the 20px/9px spacing, and Enter on Replay retained the original button's focus after image decode.
+
+## Projection reader, browser evidence and publication planning — 2026-10-26
+
+**Chronograph acceptance (#344).** [#441](https://github.com/Chris0Jeky/CommitAtlas/pull/441)
+fixes a real Unicode legend overflow while preserving all six independent release markers and
+rows. The controlled [browser run](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40266669682)
+uses clean source, Playwright 1.57.0 and its explicitly selected Chromium 143.0.7499.4. All 576
+measured layouts and six CSS/SMIL playback/control rows pass. Ambient output returns exactly to
+its still control at 46 seconds; no-motion and stale controls remain pixel-identical. Five source
+hashes, 30 PNGs, 26 pixel comparisons and six WebM hashes/container signatures were independently
+verified. The tracked [receipt](./CHRONOGRAPH_EVIDENCE.md) preserves actual frame times; the first
+capture is not claimed as exact animation frame zero. The final
+[quality gate](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40267106020) passes the merged
+tree with a fresh Action bundle. This closes #344, not the separate #113 transport matrix.
+
+**Validated C0 Lens reader (#145).** [#442](https://github.com/Chris0Jeky/CommitAtlas/pull/442)
+pins the published producer contract and unchanged synthetic showcase to
+`bae3bddf7295b767d57196887bd648ba1cfe2ab3`. Strict schema, privacy, canonical-hash, snapshot-clock
+and alias checks precede static/scene consumption. Static input must be tracked, contained, a
+regular UTF-8 file and at most 256 KiB; observed symlinks, ancestor changes, foreign Git-index
+overrides and literal-pathspec spoofing are rejected. Rechecks are detection, not atomic protection
+against hostile swap-and-restore races. The hosted adapter accepts only the vendored fixture with
+an explicit synthetic demo snapshot. The fixture retains its September 1 timestamp and ages
+normally; it is never refreshed to look current. Fresh/stale/expired boundaries, invalid-input
+failures before writes and existing no-Lens configurations are covered by regression tests.
+The parser understands C1 semantics, while publishing adapters reject C1: the operative Q-9
+answer is **No**, as [recorded by the owner](https://github.com/Chris0Jeky/CommitAtlas/issues/170#issuecomment-6132999075).
+The C0 reader does not authorize #153 profile publication or register a signature scene.
+The [exact merged-tree gate](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40267565012)
+passes 657 SVG tests, 341 static tests, 368 GitHub source tests and 100 built-product tests,
+alongside all other repository gates and the Action rebuild check. #145 is closed.
+
+**Lens coverage display (#151).** The existing Evidence Coverage instrument appends the validated
+synthetic projection's derived score, age/state and every supplied registry warning. These rows
+remain neutral, text-only and excluded from observed counts and scan targets. Historical scores
+say STALE or EXPIRED; independent GitHub observations retain their own validity. No-Lens and legacy
+common-context output remain byte-identical, while unavailable roots withhold the Lens section.
+The [display contract](./EVIDENCE_COVERAGE_SCENE.md) records the rejection cases, paired static
+outputs and local browser geometry scope. All eight warning texts fit within the unchanged
+instrument budget and 1000px frame bound. This does not register a signature scene or authorize
+real projection publication.
+
+**Publication shadow planner (#256).** [#440](https://github.com/Chris0Jeky/CommitAtlas/pull/440)
+adds a test-only planner over explicit ownership and a complete observation set. It plans all
+themes before mutation, preserves foreign siblings, emits canonical payloads with manifests last,
+and bounds scope and operation bytes. Sixteen planner tests include real v1 manifests, multiple
+themes, retirement, retries and dry runs; four deliberate mutations were caught. Its
+[full quality gate](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40265309834) passes.
+The planner performs no I/O and is not exported or activated in production. Ownership migration,
+the executor/recovery policy and native platform/crash qualification remain under #256; v1 is
+still the publishing path.
+
+## Maintenance integration proof — 2026-10-26
+
+**WebKit selector/layout gate (#180).** A read-only [metadata observation](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40264555209)
+at `907e38f` observed Playwright 1.57.0 / WebKit 26.0 and byte-identical pinned raw, fixture and
+Worker SVGs, with natural `400x133` and rendered `400x133.328125` geometry. It did not reproduce the
+September zero-width failure. It did observe GitHub replacing the selected server-rendered image
+before the containing React app acquired `loaded`. The bounded harness repair synchronizes target
+selection to that marker, retains exact URL/MIME/body and positive bounded geometry checks, and
+binds load timing through every frame to the same DOM node. The compact receipt and explicit limits
+are in [MOTION_COMPATIBILITY.md](./MOTION_COMPATIBILITY.md). The one authorized [seven-row run](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40265885569)
+at reviewed head `662097d` accepted seven discoveries and completed three raw rows: `css-enter`
+animates in img/picture, and the reduced picture is static. The first Camo row then failed closed
+at 447 ms against the 250 ms sample's unchanged 440 ms completion limit. All completed artifacts
+were independently rehashed and their pixel differences recomputed. No Camo or positive-control
+recording verdict, seven-row completion, retry, or unfiltered matrix is claimed. #180 and #113
+remain open for the complete bounded diagnostic and subsequent matrix.
+The merged source follow-up [#443](https://github.com/Chris0Jeky/CommitAtlas/pull/443) separates
+screenshot, post-capture check and file-write durations, and retains rejected-row diagnostics
+through setup, cleanup and video finalization. The first post-screenshot browser clock remains a
+conservative upper bound; the 250 ms target and unrounded 440 ms limit are unchanged. All 44
+motion-probe tests pass independently, and the
+[exact merged-tree gate](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40268044755) passes.
+No additional hosted capture or revised verdict is claimed.
+
+The integrated follow-ups in [#434](https://github.com/Chris0Jeky/CommitAtlas/pull/434) and
+[#435](https://github.com/Chris0Jeky/CommitAtlas/pull/435), together with the #423/#427 repairs below,
+pass the complete `npm run check` using hosted CI's exact Node 22.13.0 and npm 10.9.2. The gate
+includes 42 deployment checks, 365 GitHub source/route tests, 651 SVG tests, 313 static tests,
+five Action tests with a clean rebuilt-bundle comparison, 26 packaging checks, and 100 built-product
+tests. Type generation, typecheck, lint and the remaining gate stages also pass.
+
+**Served build identity (#345).** The Worker embeds the validated source checkout SHA and exposes
+`buildSha` from uncached health. The resolver ignores inherited Git repository/config overrides,
+rejects archives and enclosing repositories as identity sources, and supports linked worktrees.
+Runtime SHA claims cannot replace the compiled value. Deployment verification requires the served
+identity to match the expected checkout; standalone status-only checks remain explicit. Comparison
+occurs after upload and does not automatically roll back. HEAD identifies a commit, not uncommitted
+edits. The exact-head hosted [#434 gate](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40251103221)
+also passes, including 100 product tests, bundle freshness and a zero-vulnerability production audit.
+This source/CI receipt does not establish a live deployment identity or refresh profile adoption.
+
+**Deployment convergence follow-up (#345).** The first strict live checks exposed two additional
+boundaries. [Deployment 40252357031](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40252357031)
+received a pre-identity response; [deployment 40252641422](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40252641422)
+expected `f9b533b` but initially received the preceding release `e1c4a65`. Each passed the other
+20 probes and correctly failed identity qualification. Health identity propagation now shares
+the existing five-attempt transport budget, with at most 50 seconds of scheduled backoff plus
+request time. A successful check still requires the exact expected SHA; unrelated HTTP, status,
+JSON and body-read failures remain immediate. The deploy script also drains stdout and stderr
+before synchronous verification and forced exits, preserving verbose Wrangler output and the
+commit/Worker-version receipt. Slow-pipe regressions cover successful and failing verification.
+These repairs do not turn the two failed deployments into passing receipts; the subsequent
+hosted deployment result is the live acceptance evidence recorded under #345.
+
+**Production stale-file protection (#256).** The v1 writer retains the previous manifest's size
+and SHA-256 and checks each stale file's current contents and single-link file identity before any
+theme deletes or replaces published output. Changed bytes or substituted links stop publication.
+Missing files are skipped. Legacy name-only, invalid-integrity and duplicate ownership records
+preserve files; selected current outputs retain their overwrite contract. Fourteen individual
+regressions failed before repair; the repaired publication suite passes 24/24 in both implementation
+and independent review. The Action bundle includes this production repair. The v2 store remains
+test-only; concurrent-writer isolation, path-based race windows, crash atomicity and native Windows
+qualification remain outside this receipt and #256 stays open.
+
+**Studio status correction (#141).** [#336](https://github.com/Chris0Jeky/CommitAtlas/pull/336) already
+extended #334's bounded SVG response and decoded-image approval lifecycle to all eight cards.
+Cards and scenes share reversible global/per-image Replay, Reduced-motion and Frame-zero tools
+and renderer-owned counters. Still views use `motion=none` twins and cannot approve an unseen
+animated configuration. #336 records built-Worker browser evidence at its reviewed head; current
+production qualification and the actual GitHub README round-trip remain under #141. The separate
+#113 raw/Camo matrix remains incomplete. The October 7 receipt below describes its earlier scope.
+
+## Issue #427 remaining boundaries, verified 2026-10-26
+
+The remaining slice merged in [#433](https://github.com/Chris0Jeky/CommitAtlas/pull/433) (`e32b50e`),
+closing #427 after the full [exact-head hosted gate](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40250393731).
+
+All four public `GitHubClient` operations validate handles before credential proof or transport.
+Project batches validate their entire dense array before scheduling any request. Valid identifiers
+are trimmed with casing preserved, valid empty boards remain supported, and direct nonempty calls
+now share the public/static maximum of six unique repositories. Sparse slots, malformed containers,
+invalid later entries and duplicate names fail as bounded `invalid_input`, with zero upstream I/O.
+
+Built-Worker tests cover all twelve hosted SVG routes (seven cards, projects and four scenes) with
+a synthetic configured token. Successful and conditional responses remain `private, no-store`,
+reordered URLs remain direct, failures remain bounded and public LAST_GOOD receives no reads or
+writes. Tests drain deferred `waitUntil` work. Synthetic demos remain public and make no GitHub
+calls even when a token is configured. Mutating the compiled cache decision to public made all
+twelve token-route cases fail; the mutation was restored before the final gate.
+
+The installed Vinext image parser already rejects remote and recursive targets before `ASSETS`.
+Nine built-Worker target cases pin that existing boundary, including backslash and normalized-path
+variants. No new remote-fetch behavior or redundant worker URL parser was introduced. This does
+not claim that every internally caught dependency transform error is sanitized.
+
+The final local `npm run check` passes on Node 22.13.0, including 364 GitHub source/route tests,
+651 SVG tests, 294 static tests, five Action tests with a clean rebuilt-bundle comparison, and
+99 built-product tests. The focused client/parser suite passes 119 tests. This is synthetic local
+evidence; live credential setup and the 730-day token verification remain #307/#338.
+
+The Delivery quota slice merged as #430 (`60d28bf`) after independent review and full hosted
+quality gate [40222022282](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40222022282).
+Its subsequent main-branch CI [40249703863](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40249703863)
+also passes. The dated Delivery receipt below retains its earlier local-only scope.
+
+## Issue #423 lock-release recovery, local proof 2026-10-26
+
+The repair merged in [#432](https://github.com/Chris0Jeky/CommitAtlas/pull/432), closing #423 after
+the full [exact-head hosted gate](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40249961044).
+Its subsequent [main CI](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40250522112) also passes.
+
+The test-only publication control store can finish releasing an owned lock when an unlink
+persisted before reporting failure. A missing original and quarantine path permit only the
+final directory flush; replacement files still require ownership verification. Ownership state
+is retained until that flush succeeds. Windows sharing errors use the existing bounded retry
+deadline, rechecking containment and ownership on every attempt.
+
+The acquisition contract now documents release after a quarantine scan fails following lock
+creation. Regression fixtures also preserve foreign quarantines and replacement locks.
+The focused control-store suite passes 122 tests; `npm run test:static` passes 294/294 with no
+skips, and typecheck and lint pass. These are real temporary-directory tests on Linux, with
+synthetic Windows platform/error/clock faults; native Windows sharing and power-loss durability
+are not claimed. The v1 writer remains the production path and #256's v2 activation stays open.
+
+## Current source inventory, reconciled 2026-10-26
+
+This inventory includes the merged Signature and appearance follow-up in #449, the rebuilt Action,
+and the earlier appearance change in #448; the verification scope is stated above. Deployment and profile
+adoption require their own dated receipts. The older receipts below retain their original scope;
+branch-only and "not shipped" statements in those receipts are historical, not the current source
+boundary.
+
+- **Compiler and engine ship in source.** `packages/svg/src/index.ts` exports `MotionPlan`, the
+  scene registry/render APIs, deterministic seed helpers, and provisional backend/budget policy.
+  `motion/compiler.ts`, `motion/css.ts`, `motion/smil.ts`, and `scene.ts` implement that surface;
+  `tests/motion.test.mjs` and `tests/scene.test.mjs` in the SVG package cover its structural contracts.
+  Existing cards retain compatibility motion. Atlas adoption (#126), the complete compatibility
+  matrix (#113, with #180's WebKit diagnostic), and measured budgets (#114) remain open.
+- **Seven built-ins are registered** in `packages/svg/src/scene.ts`: `evidence-coverage` (#133),
+  `activity-terrain` (#135), `chronograph` (#136), `lifecycle-map` (#137), `identity-beacon` (#134),
+  `nebula` (#157), and `signature` (#147). The hosted catalogue and `app/api/v1/scenes/[id]/route.ts` expose only the
+  first four. Identity Beacon, Nebula and Signature are static scenes with no hosted SVG endpoints. All seven
+  currently support only `survey`; `packs.ts` implements the four frame geometries (#156), not
+  four selectable variants of every built-in.
+- **Static/Action source delivery is implemented.** The CLI calls `generateStatic`; the static renderer
+  selects registered scenes and writes `scene-<id>.svg` artifacts with per-theme manifests.
+  The Action calls the same generator and reports generated paths through its `scenes` output.
+  Identity Beacon requires validated static identity and accepts `none | ambient | cinematic`;
+  Nebula and Signature accept `none | ambient`; the hosted four accept `none | subtle | ambient`.
+  Signature requires a full validated C0 Lens projection; both static paired-output tests and
+  executed-bundle tests verify fresh, stale, expired and dry-run delivery.
+  SVG scene tests, static scene/identity tests, and `action/action.test.mjs` cover the existing seams.
+- **Chronograph layout and local-browser playback are qualified.** Its decorative rings encode
+  666/4662/19980 ms periods; coincident releases keep separate numbered markers and bounded legend
+  rows. The needle remains fixed at its true reading. The structural regressions and actual
+  browser receipt in [CHRONOGRAPH_EVIDENCE.md](./CHRONOGRAPH_EVIDENCE.md) complete #344. The separate
+  GitHub raw/Camo matrix remains open.
+- **Identity Beacon text bounds and direct-image playback are qualified.** Its complete bounded
+  identity text, matched bodies and unmatched focus labels fit both widths under the measured
+  native/serif/monospace substitutions. Static focus labels are associated with the complete
+  configured repository identity without renaming shared card/scene inputs. The
+  [receipt](./IDENTITY_BEACON_EVIDENCE.md) records 864
+  geometry cases and 20 CSS/SMIL playback/control rows at requested 0/2/6-second offsets, with
+  actual observation times. Cinematic acquisition and body entry run once, followed by a delayed
+  12-second beam cycle; the whole introduction does not restart each cycle. Reduced controls use
+  explicit picture/none twins, not a claimed direct-CSS image media-query result. This completes
+  the clarified #134 scene acceptance without qualifying profile adoption or the #113 transport
+  matrix.
+- **The first C0 Signature consumer is qualified and merged.** The registered `signature` requires
+  an immutable producer-validated C0 projection with snapshot-clock freshness; the legacy common
+  context cannot supply its six readings. The [scene](./SIGNATURE_SCENE.md) retains all supplied
+  text and exact values, with two decorative motion groups only when fresh. Its Gallery evidence
+  is derived even when historical; the separate stale state remains visible. The
+  [CI receipt](./SIGNATURE_EVIDENCE.md) records its source, browser and bundled delivery checks. Evidence Coverage
+  also consumes the full context's synthetic derived score, warnings and age without reinterpreting
+  them as GitHub observations. Further Signature scenes remain under #111. C1 publication stays
+  disabled by #170 / Q-9 No. Findings inputs
+  still produce explicit unavailable output. The gallery's WB-C1 tile uses the existing pinned
+  method-trial summary, not a `research-instrument` scene or a shipped finding projection reader.
+  Those scenes and the remaining catalogue are tracked under #111. Studio preview tooling exists,
+  but #141's README round-trip and remaining acceptance are not established by source inspection.
+
+Exports, registry metadata, hosted routes and static/Action source entry points match this inventory.
+The linked receipts above distinguish source checks, timed browser evidence and remaining gates.
+
+## Issue #427 slice: Delivery quota refusals, 2026-10-25
+
+Delivery collection preserves primary and secondary quota refusals as `github_rate_limited`
+(429), including bounded HTTP 403 messages and HTTP 200 GraphQL errors. It shares the general
+client's validated retry guidance and keeps upstream bodies out of returned errors. Successful
+counts with an exhausted-quota header remain valid; non-quota refusals keep their existing behavior.
+The focused Delivery tests cover HTTP and GraphQL refusal forms (20/20 pass). Review reproduced
+raw stream-cancellation errors replacing HTTP 403/429 quota refusals; discarding a failed body
+now preserves the bounded quota error. Both new cancellation regressions failed before that guard.
+The prebuilt Action bundle is rebuilt from this source.
+
+`npm run typecheck:worker`, `npm run typecheck`, `npm run lint`, `npm run test:github` and `npm test`
+pass locally. The GitHub gate passes 41 package, one discovery and 348 source/route tests; the
+built product passes 74/74. Full `npm run check` is not claimed: two static tests and two executed
+Action tests require Git-writing fixtures, excluded under this session's no-Git-writes constraint.
+All other permitted gate stages pass, including 265 static tests (one existing Windows skip)
+and three Action metadata checks.
+The Action bundle freshness check against committed content also awaits the permitted commit.
+No live token-backed quota exhaustion, hosted CI or deployment is claimed.
+No human-action file is declared. The remaining client identifier-validation claim stays open under #427.
+
+## Issue #427 image failure boundary, local proof 2026-10-25
+
+The Worker awaits image optimization inside its error boundary. Escaping asset-binding
+exceptions now return the standard 500 `internal_error` JSON with `no-store` and security
+headers. The error passed to the shared response helper has a fixed message, so escaping
+binding details enter neither that helper's log nor the response.
+
+Built-Worker regressions cover a synchronous asset-fetch throw, a rejected fetch promise,
+and a failed refetch after a transform consumes the source. All three failed against the
+original bundle; the existing successful unbound PNG passthrough remains green. `npm test`
+passes 74/74; `npm run typecheck:worker`, `npm run typecheck`, and `npm run lint` pass.
+This is local Node harness evidence with synthetic binding faults; deployed Cloudflare
+bindings remain unverified. The other #427 claims remain open. No human-action file is declared.
+
+## Issue #256 slice 2: repository control store, 2026-10-22
+
+`packages/static/src/publication-control-store.ts` adds repository-contained transaction storage
+behind the slice-1 protocol and codec. Only tests import it; the package entry point, v1 writer,
+CLI defaults and Action remain unchanged. Journal and artifact files use exclusive creation,
+staged/backup bytes are digest-checked, status replacements flush and close their temporary file
+before rename, and incomplete/corrupt transactions block another generation.
+
+The four open design decisions remain explicit in `PUBLICATION_CONTROL_POLICY`: destination
+mutation is disabled pending ownership migration; status stays under the control root; stale
+locks require explicit recovery and are never automatically reclaimed; directory flush is required
+unless tests explicitly select `directoryFlush: "report-unsupported"`. Unsupported directory flush
+is reported as weaker durability, and file flush failures remain fatal.
+
+The temp-directory tests cover containment (including Windows junctions), entry kinds, exclusive
+creation, digests, locking, durability, all slice-2 named storage checkpoints and interruption after
+each transaction-creation storage operation. Destination installation and on-disk rollback or
+roll-forward belong to the later publication engine; their existing slice-1 tests remain pure.
+This is local source work, with no production v2 activation or Action bundle rebuild.
+Local proving: `npm run test:static` passes 244/245 tests (one existing Windows file-symlink
+skip); `npm run typecheck`, `npm run lint`, and `node --test tests/test-discovery.test.mjs`
+pass. A restart regression proves readable bytes left by a failed flush are flushed again before
+preparation advances. Native directory flush reports unsupported on this Windows host; Linux,
+macOS and actual power-loss durability are not verified here. No human-action file is declared.
+
+## Gallery route, local proof 2026-10-16
+
+`/gallery` serves the synthetic demo snapshot. With fetch stubbed to throw, the built Worker
+returns the five family headings and one tile per registered card, registered scene, and the
+vendored WB-C1 finding. The printed count equals that registry. Each tile prints its id, family,
+evidence rung, pack, and motion, plus one `SYNTHETIC DEMO` marker. An identity beacon without an
+identity is unavailable. The finding prints C0 and reject, and the page does not contain
+`promoted`. Two requests are byte-identical and share a weak ETag; a matching If-None-Match
+returns 304. This route keeps `cache-control: no-store, must-revalidate`. The sitemap and the
+landing and Studio nav include `/gallery`. Studio query preselect applies after hydration, and
+only for a hosted card or hosted scene. This note is local source proof. It is not a deployment
+or a browser playback claim.
+
+
 
 The release path is in [V0_1_PLAN.md](./V0_1_PLAN.md), the static contract is in
 [STATIC_GENERATOR_PLAN.md](./STATIC_GENERATOR_PLAN.md), the walkthrough is in
 [DEMO_GUIDE.md](./DEMO_GUIDE.md), and the complete evidence matrix is in
 [RELEASE_CANDIDATE_QA_2026-08-20.md](./RELEASE_CANDIDATE_QA_2026-08-20.md).
 
+## Issue #338 source repair, 2026-10-15
+
+The working-tree repair separates GitHub authentication, permission, quota, deadline and
+availability errors without changing the v1 envelope. Public LAST_GOOD eligibility now follows
+a separate matching-304 validation timestamp, while original storage/observation evidence stays
+unchanged. This fixes the 200 at day 0 -> matching 304 at day 6 -> upstream failure at day 8 case;
+it does not establish the cause of the deployed October 8 outage. See
+[the error and retention contract](ARCHITECTURE.md#hosted-delivery-and-caching).
+
+Deployment, KV binding/key contents and owner token setup remain separate. The driver's
+2026-10-15 measurement reports no Worker secrets; no secret was accessed or configured by this
+repair. Token-backed requests continue to bypass the public fallback by design.
+
+Local evidence: the original focused suites passed 99/99; the regression-first run failed
+10/104 tests for the expected error-classification and retention defects. The repaired focused
+suites pass 105/105; `npm run test:github` passes its 41 package checks, discovery check and
+303 source/route tests. `npm test` passes 65/65 built-output checks, including all three reported
+SVG routes across upstream failure classes. Typecheck, lint, Action rebuild and five executed
+Action checks pass. No commit, push, deployment or full `npm run check` is claimed. Local command
+logs are retained under ignored `work/issue-338/`.
+
+## Scene delivery checkpoint, 2026-10-07
+
+#333 completes the lifecycle map (#137): bounded declared rows, distinct CI words and
+geometry, independent partial signals, provenance/freshness and paired static/Action
+output. #334 adds the Studio scene-preview slice: all three accepted scenes,
+reversible global/per-image views, actual decoded-image approval and renderer-owned
+counters. Existing card previews and private-data collection are unchanged.
+
+Both exact-head gates and combined main `bb3c1d659ab703c83b7a15fbd731e1c3140aeb39`
+pass. A real built-Worker Chrome keyboard traversal reached 16/16 tool buttons in
+46 Tab presses; synthetic error, stale-attempt, unsupported-pack and desktop/mobile
+layout cases also passed. The corrected scene panels were visually inspected.
+
+[Retained verification and remaining acceptance](evidence/2026-10-07-scene-delivery.md)
+records exact source, CI, artifact hashes, deployment attempts and browser scope.
+Consult that dated receipt for production qualification; source/browser checks are
+not a blanket deployment or README/Camo verdict. #141 remains open for card-tool
+parity and actual README round-trip qualification. #113 and owner gates are unchanged.
+
+The checkpoints below remain historical, not claims about this newer source.
+
 ## Public checkpoint
+
+### QA sweep and scene-merge window (2026-10-04)
+
+An independent seven-lane audit (correctness, gates, visual QA, GitHub triage,
+security/privacy, invariants) plus headless-Chrome visual QA (13/13 checks,
+all eight cards and both pages inspected) produced PR #301: health-route param
+rejection and dynamic rendering, unbound image-optimizer passthrough, honest
+Studio notices, non-blocking project URL inputs, corrected Studio social-image
+dimensions, the orphaned board-isolation suite wired into `test:studio`, and an
+`eol=lf` pin for the action bundle. Full `npm run check` is green.
+
+In the same window, #299 (evidence-coverage scene, closes #133) and its stacked
+follow-up #300 (publication/scene capacity reconciliation) were each
+independently reviewed and merged with green Quality gates; #256 stays open for
+durable storage/ownership/fault tests. Draft #186 stays parked with recorded
+next steps (ledger refresh, September-receipt test pin, harness clip fix). New:
+#302 (untested core exports) and #303 (stale decision/scene backlog triage).
+
+### Source-only scene foundation (2026-10-03)
+
+PRs #295–#298 added geometric/field primitives, static scene delivery and pure recovery
+record hardening. The #133 implementation adds opt-in `evidence-coverage`, including
+paired static/Action output, explicit provenance/coverage and neutral unavailable rows.
+The hosted route `/api/v1/scenes/<id>.svg` serves GitHub-snapshot families only
+(`instrument` and `map`); evidence-coverage is the first. Production deployment of
+that route is not part of this checkpoint.
+See [EVIDENCE_COVERAGE_SCENE.md](EVIDENCE_COVERAGE_SCENE.md) for its contract. The
+release/deployment checkpoint below is historical and is not updated by these source
+changes. #186 remains browser-evidence gated; #256 still requires production recovery
+policy, storage and platform interruption work. No P1 completion or profile adoption
+is claimed.
+
+### Delivery producer maintenance (2026-09-25, PR #227)
+
+The draft producer supports scoped public PR-flow JSON/SVG and paired manifests, with
+one-request repository-visibility validation and shared static/SVG presentation. No built-in
+external reference is enabled: ordinary output marks the benchmark and multiple unavailable
+while retaining observed counts. Benchmark verification remains in #245; profile adoption and
+manual-refresh evidence remain in #226. Neither feature completion nor release publication is
+implied by this producer checkpoint.
 
 - **Released: [v0.4.0](https://github.com/Chris0Jeky/CommitAtlas/releases/tag/v0.4.0).** The
   release is tagged at merge `87bc329`, marked latest, and is neither a draft nor a prerelease. The
@@ -78,7 +594,7 @@ The release path is in [V0_1_PLAN.md](./V0_1_PLAN.md), the static contract is in
   boundaries, window-scoped, busiest day named, empty windows stated); Latest releases lists the
   most recent published release per curated project, newest first, with unreleased projects counted
   rather than hidden. Both are static-only — no hosted route — drawn from data the snapshot already
-  fetches, and covered by the frozen-motion, well-formedness, and 30 KiB gates. Review: one
+  fetches, and covered by the frozen-motion, well-formedness, and 30,000 UTF-8-byte gates. Review: one
   fresh-context adversarial pass plus eight Codex P2s triaged (six fixed across `a6e5551`/`7e44801`,
   two declined on-thread with reasons). Profile wiring landed via
   [Chris0Jeky/Chris0Jeky#5](https://github.com/Chris0Jeky/Chris0Jeky/pull/5): pin moved to
@@ -119,9 +635,9 @@ The release path is in [V0_1_PLAN.md](./V0_1_PLAN.md), the static contract is in
   present, exactly four mix bars in one ink, both section numerals, the density key, no `Inter` in
   any font stack, and every `font-family` value free of the double quote that produced malformed
   XML on the first attempt. Tag structure is balanced at 54 open / 54 close / 72 self-closing.
-- All eight cards measured against the 30 KiB budget on the live origin: atlas 19,987, activity
+- All eight cards measured against the 30,000 UTF-8-byte budget on the live origin: atlas 19,987, activity
   24,321, rhythm 5,527, breakdown 5,273, languages 4,164, profile 3,764, projects 3,371, streak
-  3,332. The largest has 6.2 KiB of headroom.
+  3,332. The largest has 5,679 bytes (5.5 KiB) of headroom.
 - **Released: [v0.2.0](https://github.com/Chris0Jeky/CommitAtlas/releases/tag/v0.2.0)**, tagged at
   `5fea6e625616a0df9ecd8e14a75f9eae74ea8500` on `main` — the merge of PR #72, with the branch's five
   commits intact and nothing squashed. Not a draft, not a prerelease, and marked latest. No package
@@ -226,21 +742,29 @@ The release path is in [V0_1_PLAN.md](./V0_1_PLAN.md), the static contract is in
   3:1 where it only strokes or fills, and asserts that a per-theme override exists only where the
   shared value genuinely failed.
 
-- Eight selectable SVG surfaces: Atlas, Profile, Streak, Breakdown, Rhythm, Activity, Languages,
-  and Projects. The landing page and Studio expose the complete suite instead of hiding the richer
-  contribution views behind one overview.
-- Atlas combines a 365-day density heatmap, total and active days, average and peak, current and
+- Eight selectable SVG card surfaces: Atlas, Profile, Streak, Breakdown, Rhythm, Activity, Languages,
+  and Projects, plus four hosted scenes and two static-only scenes listed in the current source
+  inventory above. The synthetic `/gallery` groups registered outputs by family.
+- Atlas combines an up-to-two-year density heatmap (7–730 days or `auto`, default 365), total and active days, average and peak, current and
   window-bounded longest streaks, contribution mix, 28-day momentum, public-repository languages,
   project health, and the transparent Rhythm score.
 - Breakdown distinguishes exact categorized counts from GitHub public-profile percentages. Public
   percentages are visibly and accessibly labelled as annual profile-view data, not requested-window
   counts. Rhythm is explicitly a personal consistency signal, not a GitHub rank.
 - Wide 860x380 and compact 480x570 Atlas layouts plus responsive focused cards. Ember, Aurora,
-  Midnight, and Paper themes support `motion=none|subtle`; subtle motion is transform-only, leaves
-  essential content visible at frame zero, and includes a reduced-motion override.
+  Midnight, and Paper themes support hosted `motion=none|subtle|ambient`; package and static
+  callers additionally accept `cinematic`. This compatibility slice deliberately maps every
+  non-`none` card profile to the same transform-only Subtle motion, with essential content visible
+  at frame zero and a reduced-motion override. Defaults remain Atlas `subtle`, other hosted
+  cards `none`, and static generation `none`. The CSS/SMIL compiler already drives registered
+  scenes; differentiated card textures (#126 and remaining card work under #111) and
+  the GitHub/WebKit evidence gates (#113/#180) remain unfinished.
 - Responsive landing page and interactive Studio with synthetic and supported live-public modes,
   theme/layout/motion controls, bounded six-project configuration, lazy selected-card previews,
   provenance, errors, and copyable README Markdown.
+- Studio contribution collection, preview identity, gallery URLs, and emitted README image URLs
+  share the 365-day window. Atlas wide/compact previews and their links derive from the same
+  accepted preview configuration as the other cards, including partial synthetic refreshes.
 - Studio live evidence is confirmed per preview run, not per configuration. While a retry of an
   unchanged live configuration is in flight, and after that retry fails, the prior preview stays
   visible and labelled retained, but contribution- and language-backed cards are withheld from the
@@ -252,9 +776,11 @@ The release path is in [V0_1_PLAN.md](./V0_1_PLAN.md), the static contract is in
   Docs, Install, and Download destinations appear only when observed or explicitly configured;
   individual action links remain in HTML/Markdown because an embedded README SVG cannot reliably
   expose multiple click targets.
-- Credential-free `@commit-atlas/static` CLI and Node 24 GitHub Action. One snapshot can create ten
-  selected SVG types, an optional compact Atlas, `projects.json`, `projects.md`, and a byte/SHA-256
-  manifest — up to 14 output files — while removing only known stale CommitAtlas artifacts. Optional
+- `@commit-atlas/static` CLI and Node 24 GitHub Action. The default ten card types use one
+  credential-free public portfolio snapshot. Opt-in Delivery is the eleventh type and needs a
+  GitHub token for separate public PR-flow evidence. Selected registered scenes, responsive Atlas
+  variants, catalogues and Delivery JSON add artifacts to the byte/SHA-256 manifest; the former
+  14-file ceiling no longer describes the source. Cleanup preserves unrelated output files. Optional
   bounded `themes` entries render opposite-scheme outputs into explicit directories from that same
   snapshot; each directory retains its own v1 manifest and ownership-aware cleanup boundary.
 - Generated catalog boundaries are pinned by adversarial fixtures: untrusted release tags and
@@ -367,10 +893,11 @@ The release path is in [V0_1_PLAN.md](./V0_1_PLAN.md), the static contract is in
   correctly decayed into `stale`. The rule was right and the fixture was wrong; PR #51 made the
   fixture relative and `main` is green again. No product behavior changed.
 - 2026-08-23: the Cloudflare Workers deployment answers on every probed surface —
-  `node scripts/verify-deployment.mjs https://commit-atlas.commit-atlas.workers.dev` passes 14/14,
-  covering health, the landing page, the Studio (matched on its own title), all eight synthetic
-  cards asserted script-free, the `motion=none` CSP branch, and two distinct bounded-`400` rejection
-  paths.
+  `node scripts/verify-deployment.mjs https://commit-atlas.commit-atlas.workers.dev` passes 18/18,
+  covering health, the landing page, the Studio (matched on its own title), robots and sitemap
+  consistency, structured data honesty, all eight synthetic cards asserted script-free, the
+  `motion=none` CSP branch, the fixed production motion probe, and two distinct bounded-`400`
+  rejection paths.
 - Final `npm.cmd run check` passed at `1cdabfa`: core 20, GitHub/API 79, Studio 34, SVG 25,
   static generator 9, Action 2, packaging 3, rendered product/API 28, plus TypeScript, ESLint, four
   package builds/packs, Action bundle parity, and the production Vinext build.
@@ -476,7 +1003,7 @@ The release path is in [V0_1_PLAN.md](./V0_1_PLAN.md), the static contract is in
   publication and Marketplace listing remain separate owner decisions. v0.4.0 is released and the
   release path tracked by #102 is complete.
 
-## Next programme (planned, not shipped)
+## Next programme (dated planning receipts; current source inventory above)
 
 - **2026-09-10: hosting preparation is recorded but inactive.** [`.hosting/manifest.json`](../.hosting/manifest.json)
   preserves the existing Worker, static assets, and `LAST_GOOD` KV boundary. The resumable queue is
@@ -485,6 +1012,15 @@ The release path is in [V0_1_PLAN.md](./V0_1_PLAN.md), the static contract is in
   blocked until a hostname is selected and ownership is verified; no task authorizes deployment,
   activation, namespace deletion, credential publication, or replacement of the existing service.
   Use [`.hosting/README.md`](../.hosting/README.md) for the bounded acceptance notes.
+- **2026-09-26: `public/pulseboard.js` is rebuilt at Pulseboard SDK 3.2.0** (Pulseboard `3a882cc`): a
+  focus fix for removed notices, a scroll-container option, and a registered `utm_campaign` allowlist. The
+  boundary below is unchanged; `node observatory/check.mjs` pins the new hash and version.
+- **2026-09-26: the Pulseboard SDK 3.1.0 replaces the inert observer (Pulseboard#105).**
+  `public/pulseboard.js` loads deferred from the root layout (HTML pages only) with a reserved Beta-bar
+  placeholder; the route bridge forwards `home | studio | other`, and the Studio records `studio.opened`,
+  `profile.loaded` and `card.exported` with enum and count props only. The collector stores nothing for
+  `commitatlas` until the owner admits it in Pulseboard. `observatory/README.md` holds the boundary;
+  `npm run test:observatory` is the focused proof. The entry below is superseded.
 - **2026-09-10: the Observatory adapter is staged but inactive.** The local, hash-locked
   `public/observatory.js` loads with an empty endpoint, so it creates no consent storage, timers,
   or collector requests. Activation remains a separate reviewed slice requiring an isolated
@@ -516,6 +1052,36 @@ The release path is in [V0_1_PLAN.md](./V0_1_PLAN.md), the static contract is in
   claim `frozen at frame zero`. Resume with #180 by proving WebKit asset identity independently of presentation size, rerunning its
   seven-row diagnostic once, then running #113's unfiltered three-engine raw/Camo matrix. The owner
   gates in #115–#122 and #170 remain open, and no motion behaviour from the programme is on `main`.
+
+## Motion compiler development checkpoint — 2026-10-02
+
+The #125 branch adds a dependency-free `MotionPlan` compiler for twelve primitives, with CSS and
+SMIL encodings and explicit unsupported CSS flow. Existing renderers and hosted defaults retain
+their compatibility output. Generated namespaces are deterministic, base geometry survives
+animation-node removal, content motion is constrained, and README loops encode a 45-second bound.
+Named budgets remain hypotheses; a scene can select a stricter class without increasing limits.
+
+Windows Node 22.13.0 source checks and 137 SVG tests pass. A full `npm run check` passed before the
+final stricter-budget option; that option has the complete focused proving gate. A synthetic inline
+Chromium 153.0.8010.12 check exercised both backends' centered breathe, delayed entrance and finite
+endpoint with controlled animation clocks, plus CSS reduced motion. System.Xml accepted all 24
+primitive/backend fixture documents. These do not qualify GitHub raw/Camo, SVG-as-image playback,
+Firefox/WebKit, or render-cost budgets. #113/#114 remain the acceptance gates; #126 remains dependent
+on #113 before renderer adoption. This is development evidence, not a deployment or main-state claim.
+
+## Scene engine development checkpoint - 2026-10-02
+
+The #128 stack on #125 adds the §6 scene interfaces, immutable registry/model seeds, explicit
+unavailable composition, scoped compiler accounting and shared XML/scene contracts. No real scene,
+route, config entry or backend default is activated. Signature tests use an invented C0 common
+coverage/privacy context; raw Lens artifacts, C1 contexts and unresolved coverage scores are rejected.
+Finding/identity schema adapters remain reserved and produce explicit unavailable output.
+
+Windows Node 22.13.0 typecheck, lint and 150 SVG tests passed during focused qualification. Independent
+review reproduced and corrected hidden-caption, invalid XML whitespace and animated-clone counter
+defects. A planted Math.random failed the real lint command and was removed. Full local qualification
+is coordinated separately; no browser pixel, GitHub raw/Camo, Firefox/WebKit or producer compatibility
+claim is implied by this structural engine/harness checkpoint. The public demonstration remains unchanged.
 
 ## Clean resume commands (from checkout root)
 

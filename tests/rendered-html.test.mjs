@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+
+// The built worker falls back to process.env.GITHUB_TOKEN when a request env omits the binding.
+// Keep these fixtures hermetic: a token exported in the developer shell must not switch the
+// unauthenticated paths onto authenticated GitHub calls the mocked fetch rejects.
+delete process.env.GITHUB_TOKEN;
 
 async function render(pathname = "/") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -24,6 +30,86 @@ async function request(path, extraEnv = {}, init = {}) {
     { waitUntil() {}, passThroughOnException() {} },
   );
 }
+
+function htmlSecurityPolicy(response) {
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+  assert.equal(response.headers.get("x-frame-options"), "DENY");
+  const policy = response.headers.get("content-security-policy");
+  assert.ok(policy, "HTML must carry an enforced CSP, not just a report-only policy");
+  return new Map(policy.split(";").filter((part) => part.trim()).map((part) => {
+    const [directive, ...sources] = part.trim().split(/\s+/);
+    return [directive, sources];
+  }));
+}
+
+test("the built Worker hardens every HTML document, including its not-found page", async () => {
+  for (const [path, status] of [["/", 200], ["/studio", 200], ["/gallery", 200], ["/missing-security-fixture", 404]]) {
+    const response = await render(path);
+    assert.equal(response.status, status, path);
+    assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
+    const policy = htmlSecurityPolicy(response);
+    for (const directive of ["base-uri", "object-src", "frame-src", "frame-ancestors", "worker-src", "script-src-attr"]) {
+      assert.deepEqual(policy.get(directive), ["'none'"], `${path}: ${directive}`);
+    }
+    assert.deepEqual(policy.get("default-src"), ["'self'"]);
+    assert.deepEqual(policy.get("form-action"), ["'self'"]);
+    assert.deepEqual(policy.get("script-src"), ["'self'", "'unsafe-inline'"]);
+    assert.deepEqual(policy.get("style-src"), ["'self'", "'unsafe-inline'"]);
+    assert.deepEqual(policy.get("font-src"), ["'self'"]);
+    assert.deepEqual(policy.get("img-src"), ["'self'", "data:", "blob:"]);
+    assert.deepEqual(policy.get("connect-src"), ["'self'", "https://pulseboard-observatory.commit-atlas.workers.dev"]);
+    await response.text();
+  }
+});
+
+test("the HTML policy accommodates the production bootstrap and bundled resources", async () => {
+  const response = await render();
+  htmlSecurityPolicy(response);
+  const html = await response.text();
+  // Vinext's hydration payload and the two pre-paint bootstraps are inline.
+  assert.match(html, /<script>[^<]+<\/script>/);
+  assert.match(html, /<style\b/);
+  for (const [, source] of html.matchAll(/<(?:script|img)\b[^>]*\bsrc="([^"]+)"/g)) {
+    assert.ok(source.startsWith("/") || source.startsWith("data:") || source.startsWith("blob:"), source);
+  }
+  assert.doesNotMatch(html, /(?:src|href)="https:\/\/fonts\.(?:googleapis|gstatic)\.com\//);
+  // The SDK's only cross-origin transport is deliberately allowlisted, not all HTTPS hosts.
+  const sdk = await readFile(new URL("../public/pulseboard.js", import.meta.url), "utf8");
+  const collector = /"collector":"([^"]+)"/.exec(sdk)?.[1];
+  assert.equal(collector, "https://pulseboard-observatory.commit-atlas.workers.dev");
+});
+
+test("HTML hardening does not replace the API's stricter JSON and SVG policies", async () => {
+  for (const path of ["/api/v1/health", "/api/v1/cards/atlas.svg?user=octocat&demo=true"]) {
+    let response = await request(path);
+    if (response.status === 308) {
+      const canonical = new URL(response.headers.get("location"));
+      response = await request(canonical.pathname + canonical.search);
+    }
+    assert.equal(response.status, 200);
+    assert.doesNotMatch(response.headers.get("content-type") ?? "", /^text\/html\b/i);
+    const policy = response.headers.get("content-security-policy") ?? "";
+    assert.match(policy, /default-src 'none'/);
+    assert.match(policy, /script-src 'none'/);
+    assert.match(policy, /(?:^|;\s*)sandbox(?:;|$)/);
+    assert.doesNotMatch(policy, /pulseboard-observatory/);
+    await response.text();
+  }
+});
+
+test("HTML hardening leaves App Router navigation payloads unchanged", async () => {
+  for (const path of ["/?_rsc", "/studio?_rsc", "/gallery?_rsc"]) {
+    const response = await request(path, {}, { headers: { RSC: "1" } });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "text/x-component");
+    assert.equal(response.headers.get("content-security-policy"), null);
+    assert.equal(response.headers.get("x-frame-options"), null);
+    assert.equal(response.headers.get("cache-control"), "no-store, must-revalidate");
+    assert.match(response.headers.get("vary") ?? "", /(?:^|,\s*)RSC(?:,|$)/);
+    assert.ok((await response.text()).length > 0);
+  }
+});
 
 test("server-renders the CommitAtlas product surface", async () => {
   const response = await render();
@@ -51,13 +137,13 @@ test("server-renders the CommitAtlas product surface", async () => {
   assert.match(html, /not separate cards or monitoring services/);
   assert.match(html, /Exact categorized counts when available; otherwise clearly labelled public-profile percentages/);
   assert.match(html, /Transparent personal consistency based on density and streak — not a GitHub rank/);
-  assert.match(html, /aria-label="Open the synthetic Contribution breakdown SVG"/);
-  assert.match(html, /aria-label="Open the synthetic Personal rhythm SVG"/);
+  assert.match(html, /aria-label="Open SVG for the synthetic Contribution breakdown card"/);
+  assert.match(html, /aria-label="Open SVG for the synthetic Personal rhythm card"/);
   assert.match(html, /Open SVG/);
   assert.match(html, /Open the Studio/);
   assert.match(html, /aria-label="Primary navigation"/);
   assert.match(html, /From evidence to embed/);
-  assert.match(html, /eight-route SVG URL/);
+  assert.match(html, /hosted SVG URL/);
   assert.match(html, /static CLI or pinned Action/);
   assert.match(html, /byte\/SHA-256 manifest/);
   assert.match(html, /Cadence<\/em> and <em>Releases<\/em>, which are static-only/);
@@ -215,6 +301,63 @@ test("applies a stored chassis theme before first paint, from a bounded allowlis
   }
 });
 
+/**
+ * True when a CSP would still run the inline landing-route bootstrap in `head`: its effective script
+ * policy (`script-src`, else `default-src`, else none) allows it by 'unsafe-inline', by the script's
+ * sha256 hash, or by a nonce the script carries. A bare `script-src 'self'` does not.
+ */
+function cspRunsRouteBootstrap(csp, head) {
+  const directives = Object.fromEntries(csp.split(";").map((part) => part.trim().split(/\s+/))
+    .filter(([name]) => name).map(([name, ...values]) => [name.toLowerCase(), values]));
+  const sources = directives["script-src"] ?? directives["default-src"];
+  if (!sources) return true;
+  const tag = /<script([^>]*)>([^<]*data-pulseboard-route[^<]*)<\/script>/.exec(head);
+  if (!tag) return false;
+  const nonce = /\snonce="([^"]+)"/.exec(tag[1])?.[1];
+  const hash = `'sha256-${createHash("sha256").update(tag[2]).digest("base64")}'`;
+  return sources.includes("'unsafe-inline'") || sources.includes(hash) || Boolean(nonce && sources.includes(`'nonce-${nonce}'`));
+}
+
+test("recognizes CSP sources that admit the inline landing-route bootstrap", async () => {
+  const html = await (await render("/studio")).text();
+  const head = html.slice(0, html.indexOf("</head>"));
+  const body = /<script[^>]*>([^<]*data-pulseboard-route[^<]*)<\/script>/.exec(head)?.[1] ?? "";
+  const hash = `'sha256-${createHash("sha256").update(body).digest("base64")}'`;
+  assert.equal(cspRunsRouteBootstrap("script-src 'self'; connect-src https://pulseboard-observatory.commit-atlas.workers.dev", head), false);
+  assert.equal(cspRunsRouteBootstrap("default-src 'self'", head), false);
+  assert.equal(cspRunsRouteBootstrap(`script-src 'self' ${hash}`, head), true);
+  assert.equal(cspRunsRouteBootstrap("script-src 'self' 'unsafe-inline'", head), true);
+  assert.equal(cspRunsRouteBootstrap("connect-src https://pulseboard-observatory.commit-atlas.workers.dev", head), true);
+});
+
+test("loads the Pulseboard SDK on every page the root layout renders, the 404 included", async () => {
+  // `/` and `/studio` are the product pages; the framework's not-found page also renders the root
+  // layout, so it loads the SDK and names its landing route `other`.
+  for (const pathname of ["/", "/studio", "/no-such-page"]) {
+    const response = await render(pathname);
+    if (pathname === "/no-such-page") assert.equal(response.status, 404);
+    const html = await response.text();
+    assert.equal((html.match(/<script[^>]*src="\/pulseboard\.js"[^>]*>/g) ?? []).length, 1, `${pathname} loads the SDK once`);
+    assert.match(html, /<script defer="" src="\/pulseboard\.js"><\/script>/, `${pathname} loads the SDK deferred`);
+    assert.match(html, /<body[^>]*><div data-pulseboard-bar="" style="min-height:2\.5rem"><\/div>/, `${pathname} reserves the bar first in body`);
+    assert.doesNotMatch(html, /observatory\.js/, `${pathname} still loads the retired observer`);
+    const head = html.slice(0, html.indexOf("</head>"));
+    assert.match(head, /setAttribute\("data-pulseboard-route",r\)/, `${pathname} names its landing route before the SDK`);
+    // The HTML CSP must admit the collector, and its script policy must still
+    // run the inline landing-route bootstrap (a nonce on that script, its
+    // sha256 hash, or 'unsafe-inline'); a bare `script-src 'self'` would silently record `home` again.
+    const csp = response.headers.get("content-security-policy");
+    if (csp) {
+      assert.match(csp, /connect-src[^;]*https:\/\/pulseboard-observatory\.commit-atlas\.workers\.dev/);
+      assert.ok(cspRunsRouteBootstrap(csp, head), `${pathname} CSP script-src would block the inline route bootstrap`);
+    }
+  }
+  for (const path of ["/api/v1/profile?user=octocat&demo=true"]) {
+    const body = await (await request(path)).text();
+    assert.doesNotMatch(body, /pulseboard/i, `${path} must never carry the SDK`);
+  }
+});
+
 test("server-renders an honest interactive Studio shell", async () => {
   const response = await render("/studio");
   assert.equal(response.status, 200);
@@ -230,13 +373,25 @@ test("server-renders an honest interactive Studio shell", async () => {
   assert.match(html, /The path to an embed/);
   assert.match(html, /aria-label="Project 1 repository"/);
   assert.match(html, /aria-label="Project 2 repository"/);
-  assert.match(html, /aria-label="Remove project 1: Hello-World"/);
-  assert.match(html, /aria-label="Remove project 2: Spoon-Knife"/);
+  assert.match(html, /aria-label="Remove Hello-World, project 1"/);
+  assert.match(html, /aria-label="Remove Spoon-Knife, project 2"/);
+  assert.match(html, />Remove (?:<!-- -->)?Hello-World</);
+  assert.match(html, />Remove (?:<!-- -->)?Spoon-Knife</);
   assert.match(html, /<span>Breakdown<\/span>/);
   assert.match(html, /<span>Rhythm<\/span>/);
   assert.match(html, /2<!-- --> preview<!-- -->s/);
   assert.match(html, /Copy stays disabled until Preview validates this exact configuration/);
   assert.match(html, /<button type="button" disabled="">Copy Markdown<\/button>/);
+  assert.match(html, /<legend>Scene pack<\/legend>/);
+  assert.match(html, /<button type="button"[^>]*>Profile view<\/button>/);
+  for (const scene of ["Activity terrain", "Evidence coverage", "Lifecycle map"]) assert.ok(html.includes(scene));
+  for (const pack of ["Survey", "Orbital", "Spectral", "Terminal"]) assert.match(html, new RegExp(`<strong>${pack}</strong>`));
+  assert.match(html, /Scenes to show &amp; copy/);
+  assert.match(html, /<span>Evidence coverage<\/span>/);
+  assert.match(html, /<legend>Preview tools<\/legend>/);
+  assert.match(html, /<button type="button"[^>]*>Replay<\/button>/);
+  assert.match(html, /<button type="button"[^>]*>Reduced-motion view<\/button>/);
+  assert.match(html, /<button type="button"[^>]*>Frame zero<\/button>/);
   assert.doesNotMatch(html, /your-commitatlas-host\.example/);
   assert.doesNotMatch(html, /Updated 8m ago|\+18%|Building in public, one useful commit/);
 });
@@ -253,7 +408,7 @@ test("serves a versioned synthetic profile without a token", async () => {
 
 test("reports contribution capability without claiming an unverified credential works", async () => {
   for (const [token, expected, cacheControl] of [
-    ["", { status: "available", mode: "public-profile" }, "public, max-age=60, s-maxage=60"],
+    ["", { status: "available", mode: "public-profile" }, "no-store"],
     ["ghp_public-only", { status: "unverified", mode: "configured-credential" }, "private, no-store"],
     ["unknown-private-capable-token", { status: "unverified", mode: "configured-credential" }, "private, no-store"],
   ]) {
@@ -402,13 +557,14 @@ test("uses only aligned configured workflows in the built Worker project route",
     const url = new URL(input instanceof Request ? input.url : input.toString());
     configuredCalls.push(url.pathname);
     if (url.pathname === "/repos/acme/atlas") return githubJson(publicProjectPayload());
+    if (url.pathname.endsWith("/branches/main")) return githubJson({ name: "main", commit: { sha: CI_HEAD_SHA } });
     if (url.pathname.endsWith("/releases/latest")) return githubJson({}, 404);
     if (url.pathname.endsWith("/actions/workflows/ci.yml/runs")) return githubJson(workflowRuns("success"));
     assert.fail(`unexpected GitHub route: ${url.pathname}`);
   }, () => request("/api/v1/projects?owner=acme&repos=atlas&states=atlas:active&workflows=atlas:ci.yml"));
   assert.equal(configured.status, 200);
   assert.deepEqual((await configured.json()).projects[0].ci, {
-    state: "passing", label: "Passing", workflow: "ci.yml", url: null, checkedAt: RECENT_RUN_UPDATED_AT, headSha: null,
+    state: "passing", label: "Passing", workflow: "ci.yml", url: null, checkedAt: RECENT_RUN_UPDATED_AT, headSha: CI_HEAD_SHA,
   });
   assert.equal(configuredCalls.some((path) => path.endsWith("/actions/runs")), false);
 
@@ -427,6 +583,7 @@ test("uses only aligned configured workflows in the built Worker project route",
   const wrongWorkflow = await withMockedFetch(async (input) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
     if (url.pathname === "/repos/acme/atlas") return githubJson(publicProjectPayload());
+    if (url.pathname.endsWith("/branches/main")) return githubJson({ name: "main", commit: { sha: CI_HEAD_SHA } });
     if (url.pathname.endsWith("/releases/latest")) return githubJson({}, 404);
     if (url.pathname.endsWith("/actions/workflows/docs.yml/runs")) return githubJson(workflowRuns("failure"));
     assert.fail(`unexpected GitHub route: ${url.pathname}`);
@@ -490,7 +647,8 @@ test("keeps rate-limit and upstream-outage codes distinct from not found in the 
   for (const [status, expectedStatus, expectedCode] of [
     [404, 404, "github_not_found"],
     [500, 502, "github_unavailable"],
-    [403, 502, "github_unavailable"],
+    [401, 502, "github_auth_required"],
+    [403, 502, "github_forbidden"],
     [429, 429, "github_rate_limited"],
   ]) {
     const response = await withMockedFetch(
@@ -498,7 +656,11 @@ test("keeps rate-limit and upstream-outage codes distinct from not found in the 
       () => request("/api/v1/profile?user=octocat"),
     );
     assert.equal(response.status, expectedStatus, `upstream ${status}`);
-    assert.equal((await response.json()).error.code, expectedCode, `upstream ${status}`);
+    const payload = await response.json();
+    assert.equal(payload.version, 1);
+    assert.equal(payload.status, "error");
+    assert.deepEqual(Object.keys(payload).sort(), ["error", "generatedAt", "status", "version"]);
+    assert.equal(payload.error.code, expectedCode, `upstream ${status}`);
   }
 
   const exhausted = await withMockedFetch(
@@ -549,6 +711,7 @@ test("treats only 404 as an absent optional lookup in the built Worker project r
   const projectFetch = (optional) => async (input) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
     if (url.pathname === "/repos/acme/atlas") return githubJson(publicProjectPayload());
+    if (url.pathname.endsWith("/branches/main")) return githubJson({ name: "main", commit: { sha: CI_HEAD_SHA } });
     if (url.pathname.endsWith("/releases/latest") || url.pathname.endsWith("/actions/workflows/ci.yml/runs")) return optional();
     assert.fail(`unexpected GitHub route: ${url.pathname}`);
   };
@@ -589,6 +752,7 @@ test("never reports a malformed workflow_runs payload as configured or clean in 
     const response = await withMockedFetch(async (input) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
       if (url.pathname === "/repos/acme/atlas") return githubJson(publicProjectPayload());
+      if (url.pathname.endsWith("/branches/main")) return githubJson({ name: "main", commit: { sha: CI_HEAD_SHA } });
       if (url.pathname.endsWith("/releases/latest")) return githubJson({}, 404);
       if (url.pathname.endsWith("/actions/workflows/ci.yml/runs")) return githubJson(body);
       assert.fail(`unexpected GitHub route: ${url.pathname}`);
@@ -717,6 +881,65 @@ test("the built Worker serves an honest public last-good response after a primed
     ...livePayload,
     freshness: { ...livePayload.freshness, mode: "stale" },
   });
+
+  const [key, raw] = [...values][0];
+  const entry = JSON.parse(raw);
+  for (const invalid of ["no-referrer\u0000", "\u0100"]) {
+    values.set(key, JSON.stringify({
+      ...entry,
+      headers: { ...entry.headers, "referrer-policy": invalid },
+    }));
+    const rejectedCache = await withMockedFetch(
+      async () => githubJson({ message: "upstream unavailable" }, 500),
+      () => worker.fetch(new Request(`http://localhost${path}`), env, ctx),
+    );
+    assert.equal(rejectedCache.status, 502);
+    assert.equal(rejectedCache.headers.get("cache-control"), "no-store");
+    assert.equal((await rejectedCache.json()).error.code, "github_unavailable");
+  }
+});
+
+test("the built atlas and scene routes consult LAST_GOOD for every recoverable GitHub failure", async (context) => {
+  const worker = await loadBuiltWorker("svg-last-good-failure-classes");
+  const values = new Map();
+  const env = {
+    ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+    LAST_GOOD: { get: async (key) => values.get(key) ?? null, put: async () => assert.fail("failure must not persist") },
+  };
+  const ctx = { waitUntil() {}, passThroughOnException() {} };
+  const realNow = Date.now.bind(Date);
+  let elapsed = 0;
+  context.mock.method(Date, "now", () => realNow() + elapsed);
+  for (const path of ["/api/v1/cards/atlas.svg", "/api/v1/scenes/evidence-coverage.svg", "/api/v1/scenes/chronograph.svg"]) {
+    const redirect = await withMockedFetch(async () => assert.fail("canonicalization must precede GitHub"),
+      () => worker.fetch(new Request(`http://localhost${path}?user=%20octocat%20&demo=false`), env, ctx));
+    assert.equal(redirect.status, 308);
+    const canonical = new URL(redirect.headers.get("location"));
+    const pairs = [...canonical.searchParams].sort(([ak, av], [bk, bv]) => ak.localeCompare(bk) || av.localeCompare(bv));
+    const hash = createHash("sha256").update(`${path}?${new URLSearchParams(pairs)}`).digest("hex");
+    const observedAt = new Date().toISOString();
+    values.set(`public-last-good:v1:${hash}`, JSON.stringify({
+      version: 1, storedAt: observedAt, observedAt,
+      body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 220" role="img"><title>Fixture</title><desc>Public fixture</desc></svg>',
+      headers: { "content-type": "image/svg+xml", etag: `W/"${"a".repeat(64)}"` },
+    }));
+    for (const failure of [401, 403, 429, 503, "network", "timeout"]) {
+      elapsed = 0;
+      const stale = await withMockedFetch(async () => {
+        if (failure === "network") throw new TypeError("fixture-sensitive-network-detail");
+        if (failure === "timeout") elapsed = 13_000;
+        return new Response(null, { status: typeof failure === "number" ? failure : 503 });
+      }, () => worker.fetch(new Request(canonical), env, ctx));
+      assert.equal(stale.status, 200, `${path}: ${failure}`);
+      assert.equal(stale.headers.get("x-commitatlas-data-state"), "stale");
+      assert.equal(stale.headers.get("x-commitatlas-fallback-reason"), failure === 429 ? "rate-limited" : "unavailable");
+      assert.match(await stale.text(), /STALE SNAPSHOT/);
+    }
+    elapsed = 0;
+    const missing = await withMockedFetch(async () => new Response(null, { status: 404 }),
+      () => worker.fetch(new Request(canonical), env, ctx));
+    assert.equal(missing.status, 404, "not found must never resurrect a retained representation");
+  }
 });
 
 async function withMockedFetch(fetchImpl, operation) {
@@ -780,10 +1003,134 @@ function publicProjectPayload() {
 
 // CI freshness is a 72-hour window, so a pinned observation silently decays into
 // `stale` once the fixture ages past it. Observe one hour ago instead.
+const CI_HEAD_SHA = "a".repeat(40);
 const RECENT_RUN_UPDATED_AT = new Date(Date.now() - 3_600_000).toISOString().replace(/\.\d{3}Z$/, "Z");
 
 function workflowRuns(conclusion) {
   return {
-    workflow_runs: [{ status: "completed", conclusion, updated_at: RECENT_RUN_UPDATED_AT }],
+    workflow_runs: [{ head_sha: CI_HEAD_SHA, status: "completed", conclusion, updated_at: RECENT_RUN_UPDATED_AT }],
   };
 }
+
+
+test("the built Worker attributes workflow status only to the captured default-branch tip", async () => {
+  for (const matches of [false, true]) {
+    const response = await withMockedFetch(async input => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname === "/repos/acme/atlas") return githubJson(publicProjectPayload());
+      if (url.pathname.endsWith("/releases/latest")) return githubJson({}, 404);
+      if (url.pathname.endsWith("/branches/main")) return githubJson({ name: "main", commit: { sha: matches ? CI_HEAD_SHA : "b".repeat(40) } });
+      if (url.pathname.endsWith("/actions/workflows/ci.yml/runs")) return githubJson(workflowRuns("success"));
+      assert.fail(`unexpected fixture request: ${url.pathname}`);
+    }, () => request("/api/v1/projects?owner=acme&repos=atlas&states=atlas:active&workflows=atlas:ci.yml"));
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.projects[0].ci.state, matches ? "passing" : "unavailable");
+    assert.equal(payload.projects[0].ci.headSha, matches ? CI_HEAD_SHA : null);
+    assert.equal(payload.projects[0].ci.checkedAt, matches ? RECENT_RUN_UPDATED_AT : null);
+    assert.equal(payload.freshness.mode, matches ? "live" : "partial");
+  }
+});
+
+async function registeredGalleryCount() {
+  const gallery = await readFile(new URL("../lib/gallery.ts", import.meta.url), "utf8");
+  const cards = /export const GALLERY_CARD_IDS = \[([\s\S]*?)\] as const/.exec(gallery);
+  assert.ok(cards);
+  const scene = await readFile(new URL("../packages/svg/src/scene.ts", import.meta.url), "utf8");
+  const builtins = /function loadBuiltins\(\): void \{([\s\S]*?)\n\}/.exec(scene);
+  assert.ok(builtins);
+  const cardCount = [...cards[1].matchAll(/"([a-z0-9-]+)"/g)].length;
+  const sceneCount = [...builtins[1].matchAll(/registry\.set\(/g)].length;
+  const findingCount = [...gallery.matchAll(/(?<!function )findingTile\(\)/g)].length;
+  return cardCount + sceneCount + findingCount;
+}
+
+test("the gallery lists every registered output without calling GitHub", async () => {
+  const load = () => withMockedFetch(() => {
+    throw new Error("gallery must not call GitHub");
+  }, () => request("/gallery"));
+  const first = await load();
+  assert.equal(first.status, 200);
+  assert.match(first.headers.get("content-type") ?? "", /^text\/html\b/i);
+  const etag = first.headers.get("etag") ?? "";
+  assert.match(etag, /^W\/"[a-f0-9]{64}"$/);
+  assert.equal(first.headers.get("cache-control"), "no-store, must-revalidate");
+  const html = await first.text();
+  for (const heading of ["Instruments", "Maps", "Signatures", "Scenes", "Findings"]) {
+    assert.match(html, new RegExp(`<h2[^>]*>${heading}</h2>`));
+  }
+  assert.equal([...html.matchAll(/<h2\b/g)].length, 5);
+  const articles = [...html.matchAll(/<article\b[\s\S]*?<\/article>/g)].map((match) => match[0]);
+  const count = Number(/data-gallery-count="(\d+)"/.exec(html)?.[1]);
+  assert.equal(articles.length, count);
+  assert.equal(count, await registeredGalleryCount());
+  assert.equal((html.match(/data-marker="synthetic-demo"/g) ?? []).length, count);
+  assert.match(html.replaceAll("<!-- -->", ""), new RegExp(`>${count} outputs<`));
+  const familyIndex = /<nav\b[^>]*aria-label="Gallery families"[\s\S]*?<\/nav>/.exec(html)?.[0];
+  assert.ok(familyIndex, "readers can jump directly to each family");
+  const sections = [...html.matchAll(/<section\b[^>]*data-gallery-section="([a-z]+)"[\s\S]*?<\/section>/g)];
+  assert.equal(sections.length, 5);
+  for (const [section, id] of sections) {
+    const familyCount = [...section.matchAll(/<article\b/g)].length;
+    assert.match(section, new RegExp(`id="gallery-${id}"`));
+    const indexLink = new RegExp(`<a\\b[^>]*href="#gallery-${id}"[^>]*>[\\s\\S]*?<\\/a>`).exec(familyIndex)?.[0];
+    assert.ok(indexLink, `family index links to ${id}`);
+    assert.match(indexLink.replaceAll("<!-- -->", ""), new RegExp(`>${familyCount}<`));
+    if (familyCount === 0) assert.match(section, /None registered\./);
+  }
+  const signature = articles.find((article) => article.includes('data-gallery-id="signature"'));
+  assert.ok(signature);
+  assert.match(signature, /data-gallery-family="signature"/);
+  assert.match(signature, /data-rung="(?:derived|unavailable)"/);
+  assert.doesNotMatch(signature, /data-rung="observed"/);
+  if (signature.includes('data-state="stale"')) {
+    assert.match(signature, /data-rung="derived"/);
+    assert.match(signature, /class="gallery-specimen-state">Stale<\/span>/);
+  }
+  const beacon = articles.find((article) => article.includes('data-gallery-id="identity-beacon"'));
+  assert.ok(beacon);
+  assert.match(beacon, /data-rung="unavailable"/);
+  assert.match(beacon, /UNAVAILABLE/);
+  assert.doesNotMatch(beacon, /data-rung="observed"/);
+  const finding = articles.find((article) => article.includes('data-gallery-id="wbc1"'));
+  assert.ok(finding);
+  assert.match(finding, /data-rung="C0"/);
+  assert.match(finding, />C0</);
+  assert.match(finding, />reject</);
+  assert.doesNotMatch(html, /promoted/i);
+  for (const article of articles) {
+    const text = article.replaceAll("<!-- -->", "");
+    assert.match(text, /data-gallery-family="(?:instrument|map|signature|scene|finding)"/);
+    assert.match(text, /data-rung="(?:observed|derived|hypothesis|C0|declared|partial|stale|unavailable)"/);
+    assert.match(text, /data-pack="\S+"/);
+    assert.match(text, /data-motion="\S+"/);
+    assert.match(text, /<dt>Family<\/dt><dd>(?:Instruments|Maps|Signatures|Scenes|Findings)<\/dd>/);
+    assert.match(text, /<dt>Evidence<\/dt><dd>(?:observed|derived|hypothesis|C0|declared|partial|stale|unavailable)<\/dd>/);
+    assert.match(text, /<dt>Pack<\/dt><dd>\S+<\/dd>/);
+    assert.match(text, /<dt>Motion<\/dt><dd>\S+<\/dd>/);
+    assert.ok(text.indexOf("<svg") < text.indexOf("<dl"), "specimen precedes its supporting metadata");
+    const headingId = /<h3 id="([^"]+)"/.exec(text)?.[1];
+    assert.ok(headingId);
+    assert.match(text, new RegExp(`aria-labelledby="${headingId}"`));
+    assert.doesNotMatch(article, /<style/i);
+  }
+  assert.match(beacon, /href="\/studio"[^>]*>Explore Studio/);
+  assert.match(finding, /href="\/#research-bridge-title"[^>]*>Read research note/);
+  const atlas = articles.find((article) => article.includes('data-gallery-id="atlas"'));
+  assert.ok(atlas);
+  assert.match(atlas, /href="\/studio\?card=atlas"[^>]*>Customize in Studio/);
+  const lifecycle = articles.find((article) => article.includes('data-gallery-id="lifecycle-map"'));
+  assert.ok(lifecycle);
+  assert.match(lifecycle, /data-rung="declared"/);
+
+  const second = await load();
+  assert.equal(await second.text(), html);
+  assert.equal(second.headers.get("etag"), etag);
+  const cached = await withMockedFetch(() => {
+    throw new Error("gallery must not call GitHub");
+  }, () => request("/gallery", {}, { headers: { "if-none-match": etag } }));
+  assert.equal(cached.status, 304);
+  assert.equal(cached.headers.get("etag"), etag);
+  assert.deepEqual(htmlSecurityPolicy(cached), htmlSecurityPolicy(first));
+  assert.equal(await cached.text(), "");
+});

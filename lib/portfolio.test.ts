@@ -75,6 +75,89 @@ test("assembles one canonical portfolio snapshot and rich atlas input", () => {
   assert.equal(atlas.streakBasis, "returned-window");
   assert.deepEqual(atlas.streakBoundary, { current: "closed", longest: "open" });
   assert.equal(atlas.source, "public-github");
+  assert.equal(atlas.dataState, undefined);
+});
+
+test("an unrecognized project CI state counts as unavailable", () => {
+  const board = {
+    ...projects,
+    projects: [{
+      ...projects.projects[0]!,
+      ci: { ...projects.projects[0]!.ci, state: "bogus" as never },
+    }],
+  };
+  const atlas = toAtlasCard(assemblePortfolioSnapshot(profile, contributions, board));
+  assert.deepEqual(atlas.projects, { total: 1, passing: 0, attention: 0, unavailable: 1 });
+});
+
+test("a truncated repository list marks the atlas partial and omits stars and languages", () => {
+  const atlas = toAtlasCard(assemblePortfolioSnapshot({
+    ...profile,
+    stars: 999,
+    repositoriesTruncated: true,
+    freshness: { generatedAt, source: "github-rest", mode: "partial" },
+  }, contributions, projects));
+  assert.equal(atlas.dataState, "partial");
+  assert.equal(atlas.source, "public-github");
+  assert.equal("stars" in atlas.profile, false);
+  assert.equal("languages" in atlas, false);
+  assert.equal(atlas.profile.repositories, 4);
+});
+
+test("a stale contribution window stays stale when the repository list is truncated", () => {
+  const atlas = toAtlasCard(assemblePortfolioSnapshot({
+    ...profile,
+    repositoriesTruncated: true,
+  }, {
+    ...contributions,
+    freshness: { generatedAt, source: "github-graphql", mode: "stale" },
+  }, projects));
+  assert.equal(atlas.dataState, "stale");
+  assert.equal("stars" in atlas.profile, false);
+});
+
+test("a partial project board marks the atlas card partial without downgrading a worse contribution state", () => {
+  const partialBoard: ProjectBoardSnapshot = {
+    ...projects,
+    projects: [{
+      ...projects.projects[0]!,
+      ci: { ...projects.projects[0]!.ci, state: "unavailable", label: "CI unavailable" },
+    }],
+    freshness: { generatedAt, source: "github-rest", mode: "partial" },
+  };
+  const partial = toAtlasCard(assemblePortfolioSnapshot(profile, contributions, partialBoard));
+  assert.equal(partial.source, "public-github");
+  assert.equal(partial.dataState, "partial");
+  assert.equal(partial.projects?.unavailable, 1);
+  assert.equal(partial.projects?.passing, 0);
+
+  const stale = toAtlasCard(assemblePortfolioSnapshot(profile, {
+    ...contributions,
+    freshness: { generatedAt, source: "github-rest", mode: "stale" },
+  }, partialBoard));
+  assert.equal(stale.dataState, "stale");
+
+  const unavailableBoard: ProjectBoardSnapshot = {
+    ...partialBoard,
+    freshness: { generatedAt, source: "github-rest", mode: "unavailable" },
+  };
+  const worse = toAtlasCard(assemblePortfolioSnapshot(profile, {
+    ...contributions,
+    freshness: { generatedAt, source: "github-rest", mode: "partial" },
+  }, unavailableBoard));
+  assert.equal(worse.dataState, "unavailable");
+});
+
+test("atlas input preserves degraded data state separately from public-source provenance", () => {
+  for (const mode of ["partial", "stale", "unavailable"] as const) {
+    const degraded = assemblePortfolioSnapshot(profile, {
+      ...contributions,
+      freshness: { generatedAt, source: "github-rest", mode },
+    }, projects);
+    const atlas = toAtlasCard(degraded);
+    assert.equal(atlas.source, "public-github");
+    assert.equal(atlas.dataState, mode);
+  }
 });
 
 test("keeps an open final UTC day from erasing yesterday's portfolio streak", () => {
@@ -110,4 +193,64 @@ test("rejects mixed-user and incomplete portfolio sources", () => {
     }),
     /incomplete contribution window/,
   );
+});
+
+test("the Atlas calendar stays within one year while its observed streak history stays complete", () => {
+  const days = Array.from({ length: 731 }, (_, index) => ({
+    date: new Date(Date.UTC(2024, 2, 2 - (730 - index))).toISOString().slice(0, 10),
+    count: index === 0 ? 0 : 1,
+    level: index === 0 ? 0 : 2,
+  }));
+  const historical: ContributionSnapshot = {
+    ...contributions,
+    totalContributions: 730,
+    commits: 730,
+    issues: 0,
+    pullRequests: 0,
+    reviews: 0,
+    days: [...days].reverse(),
+    freshness: { generatedAt: "2024-03-02T12:00:00.000Z", source: "github-graphql", mode: "live" },
+  };
+  const snapshot = assemblePortfolioSnapshot(profile, historical);
+  const atlas = toAtlasCard(snapshot);
+
+  assert.equal(atlas.activity.length, 365);
+  assert.equal(atlas.activity[0]?.date, "2023-03-04");
+  assert.equal(atlas.activity.at(-1)?.date, "2024-03-02");
+  assert.equal(atlas.activity.filter(({ date }) => date === "2024-02-29").length, 1);
+  assert.equal(atlas.activity.reduce((total, { count }) => total + count, 0), 365);
+  assert.equal(snapshot.contributions.days.length, 731);
+  assert.equal(snapshot.metrics.window.days, 731);
+  assert.equal(atlas.window.days, 731);
+  assert.equal(atlas.total, 730);
+  assert.equal(atlas.currentStreak, 730);
+  assert.equal(atlas.longestStreak, 730);
+  assert.deepEqual(atlas.streakBoundary, { current: "closed", longest: "closed" });
+  assert.deepEqual(atlas.breakdown, { commits: 730, issues: 0, pullRequests: 0, reviews: 0 });
+  assert.equal(historical.days[0]?.date, "2024-03-02", "selecting a display window must not mutate history");
+});
+
+test("an annual Atlas calendar retains an earlier maximum and the actual stale last date", () => {
+  const days = Array.from({ length: 731 }, (_, index) => ({
+    date: new Date(Date.UTC(2026, 9, 25 - (730 - index))).toISOString().slice(0, 10),
+    count: index > 0 && index <= 400 ? 1 : index >= 729 ? 1 : 0,
+    level: index > 0 && index <= 400 ? 2 : index >= 729 ? 2 : 0,
+  }));
+  const historical: ContributionSnapshot = {
+    ...contributions,
+    totalContributions: 402,
+    days,
+    freshness: { generatedAt: "2026-10-25T12:00:00.000Z", source: "github-graphql", mode: "stale" },
+  };
+  const snapshot = assemblePortfolioSnapshot(profile, historical);
+  const atlas = toAtlasCard(snapshot);
+
+  assert.equal(atlas.activity.length, 365);
+  assert.equal(atlas.activity[0]?.date, "2025-10-26");
+  assert.equal(atlas.activity.at(-1)?.date, "2026-10-25");
+  assert.equal(atlas.activity.reduce((total, { count }) => total + count, 0), 37);
+  assert.equal(atlas.currentStreak, 2);
+  assert.equal(atlas.longestStreak, 400);
+  assert.equal(atlas.dataState, "stale");
+  assert.equal(atlas.generatedAt, "2026-10-25T12:00:00.000Z");
 });

@@ -6,12 +6,72 @@ import {
   buildStudioGalleryCards,
   contributionMetricLabel,
   contributionWindowLabel,
+  describeProjectActionUrl,
   findProjectDraft,
   safeProjectActionUrl,
   starterCiPresentation,
+  studioCiTone,
+  studioDashboardProjectHeading,
+  studioProjectCiReading,
   studioSourceLabel,
   visibleProfileStars,
 } from "./studio-presentation";
+
+test("a stale board does not paint its cached CI conclusion as current", () => {
+  assert.deepEqual(studioProjectCiReading({ boardMode: "stale", state: "passing", label: "Passing" }), {
+    state: "stale",
+    label: "Stale result",
+    tone: "warn",
+  });
+  assert.deepEqual(studioProjectCiReading({ boardMode: "stale", state: "failing", label: "Failing" }), {
+    state: "stale",
+    label: "Stale result",
+    tone: "warn",
+  });
+  assert.equal(studioCiTone("passing"), "good");
+  assert.deepEqual(studioProjectCiReading({ boardMode: "live", state: "passing", label: "Passing" }), {
+    state: "passing",
+    label: "Passing",
+    tone: "good",
+  });
+  assert.deepEqual(studioProjectCiReading({ boardMode: "live", state: "failing", label: "Failing" }), {
+    state: "failing",
+    label: "Failing",
+    tone: "bad",
+  });
+  assert.deepEqual(studioProjectCiReading({ boardMode: "demo", state: "unconfigured", label: "Not configured" }), {
+    state: "unconfigured",
+    label: "Not configured",
+    tone: "unknown",
+  });
+});
+
+test("an unavailable board does not report the cleared project list as zero", () => {
+  assert.equal(studioDashboardProjectHeading({
+    boardCount: null,
+    visibleDeclaredCount: 0,
+    typedCount: 2,
+    boardWithheld: true,
+  }), "2 declared · board unavailable");
+  assert.equal(studioDashboardProjectHeading({
+    boardCount: null,
+    visibleDeclaredCount: 2,
+    typedCount: 2,
+    boardWithheld: false,
+  }), "2 declared projects");
+  assert.equal(studioDashboardProjectHeading({
+    boardCount: 2,
+    visibleDeclaredCount: 2,
+    typedCount: 2,
+    boardWithheld: false,
+  }), "2 declared projects");
+  assert.equal(studioDashboardProjectHeading({
+    boardCount: 0,
+    visibleDeclaredCount: 0,
+    typedCount: 0,
+    boardWithheld: false,
+  }), "0 declared projects");
+});
 
 test("starter CI never invents a healthy state", () => {
   // Both rows are unknown, but they are not the *same* unknown: nothing to watch, versus something
@@ -61,6 +121,41 @@ test("project actions use the shared host and credential boundary", () => {
   assert.equal(safeProjectActionUrl("http://github.com/acme/atlas"), null);
   assert.equal(safeProjectActionUrl("https://token@github.com/acme/atlas"), null);
   assert.equal(safeProjectActionUrl("not a URL"), null);
+});
+
+test("plain-http project actions stay visible with field validation", () => {
+  const presented = describeProjectActionUrl("http://example.com/guide");
+  assert.equal(presented.href, null);
+  assert.equal(presented.raw, "http://example.com/guide");
+  assert.ok(presented.error, "http URL must surface a visible field message");
+  assert.match(presented.error ?? "", /HTTPS/i);
+});
+
+test("non-allowlisted project actions stay visible with field validation", () => {
+  const presented = describeProjectActionUrl("https://example.com/install.sh");
+  assert.equal(presented.href, null);
+  assert.equal(presented.raw, "https://example.com/install.sh");
+  assert.ok(presented.error, "non-allowlisted host must surface a visible field message");
+  assert.match(presented.error ?? "", /allowed host/i);
+});
+
+test("valid project actions still normalize and empty values stay quiet", () => {
+  const valid = describeProjectActionUrl(" https://github.com/acme/atlas/docs ");
+  assert.equal(valid.href, "https://github.com/acme/atlas/docs");
+  assert.equal(valid.raw, "https://github.com/acme/atlas/docs");
+  assert.equal(valid.error, null);
+
+  const empty = describeProjectActionUrl("   ");
+  assert.equal(empty.href, null);
+  assert.equal(empty.raw, "");
+  assert.equal(empty.error, null);
+});
+
+test("project rows keep invalid actions visible instead of dropping them", () => {
+  const source = readFileSync(new URL("./studio-client.tsx", import.meta.url), "utf8");
+  assert.ok(source.includes("describeProjectActionUrl"), "rows must describe draft URLs instead of filtering them silently");
+  assert.ok(source.includes("project-action-invalid"), "rows must keep the typed value visible");
+  assert.ok(source.includes('role="alert"'), "rows must surface an inline field message");
 });
 
 test("gallery exposes only selected, currently available cards", () => {
@@ -149,4 +244,12 @@ test("Studio text inputs retain an explicit keyboard focus treatment", () => {
   assert.match(rule[1], /outline:\s*2px solid/);
   assert.match(rule[1], /outline-offset:\s*-\d/);
   assert.match(css, /\.text-field:focus-within \{ border-color:/);
+});
+
+test("Studio exposes exactly the three hosted motion profiles", () => {
+  const source = readFileSync(new URL("./studio-client.tsx", import.meta.url), "utf8");
+  for (const profile of ["none", "subtle", "ambient"]) {
+    assert.ok(source.includes(`setMotion("${profile}")`), `missing ${profile} selector`);
+  }
+  assert.ok(!source.includes('setMotion("cinematic")'));
 });

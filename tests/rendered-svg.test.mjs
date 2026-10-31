@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+// The built worker falls back to process.env.GITHUB_TOKEN when a request env omits the binding.
+// Keep these fixtures hermetic: a token exported in the developer shell must not switch the
+// unauthenticated paths onto authenticated GitHub calls the mocked fetch rejects.
+delete process.env.GITHUB_TOKEN;
+
 async function loadWorker(label) {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}-${label}`);
@@ -10,17 +15,22 @@ async function loadWorker(label) {
 
 async function request(path, extraEnv = {}, init = {}) {
   const worker = await loadWorker(path);
-  return worker.fetch(
+  const pending = [];
+  const response = await worker.fetch(
     new Request(`http://localhost${path}`, init),
     { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) }, ...extraEnv },
-    { waitUntil() {}, passThroughOnException() {} },
+    { waitUntil(promise) { pending.push(promise); }, passThroughOnException() {} },
   );
+  await Promise.all(pending);
+  return response;
 }
 
 test("serves all seven synthetic SVG cards with their planned public cache windows", async () => {
   const cases = [
     ["/api/v1/cards/profile.svg?user=octocat&demo=true&theme=aurora&motion=subtle", "900"],
-    ["/api/v1/cards/streak.svg?user=octocat&demo=true&theme=aurora&motion=subtle", "3600"],
+    ["/api/v1/cards/streak.svg?user=octocat&demo=true&theme=aurora&days=365&motion=subtle", "3600"],
+    ["/api/v1/cards/streak.svg?user=octocat&demo=true&theme=aurora&days=730&motion=subtle", "3600"],
+    ["/api/v1/cards/streak.svg?user=octocat&demo=true&theme=aurora&days=auto&motion=subtle", "3600"],
     ["/api/v1/cards/activity.svg?user=octocat&demo=true&theme=aurora&days=7&motion=subtle", "3600"],
     ["/api/v1/cards/breakdown.svg?user=octocat&demo=true&theme=aurora&days=7&motion=subtle", "3600"],
     ["/api/v1/cards/rhythm.svg?user=octocat&demo=true&theme=aurora&days=56&motion=subtle", "3600"],
@@ -40,7 +50,92 @@ test("serves all seven synthetic SVG cards with their planned public cache windo
     assert.match(body, /prefers-reduced-motion:reduce/);
     assert.match(response.headers.get("content-security-policy") ?? "", /style-src 'unsafe-inline'/);
     assert.doesNotMatch(body, /undefined|NaN/);
+    // Camo-proxied README images: the Pulseboard SDK and any script belong to the HTML UI only.
+    assert.doesNotMatch(body, /pulseboard|<script/i, path);
   }
+});
+
+const tokenCacheRoutes = [
+  ["/api/v1/cards/profile.svg?user=octocat&demo=false&theme=aurora&motion=none", 900],
+  ["/api/v1/cards/languages.svg?user=octocat&demo=false&theme=aurora&motion=none", 900],
+  ...["streak", "activity", "breakdown", "rhythm"].map((card) => [
+    `/api/v1/cards/${card}.svg?user=octocat&demo=false&theme=aurora&days=7&motion=none`, 3600,
+  ]),
+  ["/api/v1/cards/atlas.svg?user=octocat&demo=false&theme=aurora&days=7&motion=none&layout=wide", 300],
+  ["/api/v1/projects.svg?owner=octocat&repos=atlas&states=atlas%3Aactive&demo=false&theme=aurora&motion=none", 300],
+  ...["evidence-coverage", "activity-terrain", "chronograph", "lifecycle-map"].map((scene) => [
+    `/api/v1/scenes/${scene}.svg?user=octocat&repos=atlas&states=atlas%3Aactive&demo=false&days=7`, 300,
+  ]),
+];
+
+for (const [path, edgeSeconds] of tokenCacheRoutes) {
+  test(`token-backed ${path.split("?")[0]} stays private and bypasses public storage`, async () => {
+    const storageCalls = [];
+    const env = {
+      GITHUB_TOKEN: "ghp_public-cache-fixture",
+      LAST_GOOD: {
+        async get() { storageCalls.push("get"); return null; },
+        async put() { storageCalls.push("put"); },
+      },
+    };
+    // Reordered/default-equivalent URLs must also remain direct, private responses.
+    const url = new URL(`http://localhost${path}`);
+    const reordered = `${url.pathname}?${new URLSearchParams([...url.searchParams].reverse())}`;
+    for (const query of [path, reordered]) {
+      const response = await withMockedFetch(tokenCacheGitHubFixture, () => request(query, env));
+      assert.equal(response.status, 200, query);
+      assert.equal(response.headers.get("location"), null);
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+      assert.equal(response.headers.get("content-type"), "image/svg+xml; charset=utf-8");
+      assert.match(response.headers.get("etag") ?? "", /^W\/"[a-f\d]{64}"$/);
+      assert.doesNotMatch(await response.text(), /ghp_public-cache-fixture|SYNTHETIC DEMO/);
+
+      // A conditional hit is private too, even when a client already has the bytes.
+      const conditional = await withMockedFetch(tokenCacheGitHubFixture, () => request(query, env, {
+        headers: { "if-none-match": "*" },
+      }));
+      assert.equal(conditional.status, 304);
+      assert.equal(conditional.headers.get("cache-control"), "private, no-store");
+      assert.equal(await conditional.text(), "");
+    }
+
+    const failed = await withMockedFetch(async () => githubJson({}, 503), () => request(path, env));
+    assert.equal(failed.status, 502);
+    assert.equal(failed.headers.get("cache-control"), "no-store");
+    assert.equal((await failed.json()).error.code, "github_unavailable");
+    assert.deepEqual(storageCalls, [], "token-backed success, 304, and failure must not touch public LAST_GOOD");
+  });
+
+  test(`synthetic ${path.split("?")[0]} stays public with a configured token`, async () => {
+    const demoPath = path.replace("demo=false", "demo=true");
+    const response = await withMockedFetch(async () => {
+      assert.fail("synthetic output must not contact GitHub or validate a credential");
+    }, () => request(demoPath, { GITHUB_TOKEN: "ghp_public-cache-fixture" }));
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), `public, max-age=60, s-maxage=${edgeSeconds}`);
+    assert.doesNotMatch(await response.text(), /ghp_public-cache-fixture/);
+  });
+}
+
+test("automatic demo windows retain two-year streak history beside an annual display calendar", async () => {
+  const streak = await request("/api/v1/cards/streak.svg?user=octocat&demo=true&theme=aurora&days=auto&motion=none");
+  assert.equal(streak.status, 200);
+  assert.match(await streak.text(), /Longest in 730-day window/);
+  const activity = await request("/api/v1/cards/activity.svg?user=octocat&demo=true&theme=aurora&days=auto&motion=none");
+  assert.equal(activity.status, 200);
+  const activityBody = await activity.text();
+  const period = /\d{4}-\d{2}-\d{2} → \d{4}-\d{2}-\d{2}/.exec(activityBody)?.[0];
+  assert.ok(period, "activity card shows an automatic window period");
+  const [from, to] = period.split(" → ");
+  const span = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000) + 1;
+  assert.equal(span, 365);
+  assert.equal([...activityBody.matchAll(/data-cell-count="(\d+)"/gu)].reduce((sum, match) => sum + Number(match[1]), 0), 365);
+  const atlas = await request("/api/v1/cards/atlas.svg?user=octocat&demo=true&theme=ember&days=auto&motion=none&layout=wide");
+  assert.equal(atlas.status, 200);
+  const atlasBody = await atlas.text();
+  assert.match(atlasBody, /730D/);
+  assert.match(atlasBody, /OBSERVED HISTORY/);
+  assert.equal([...atlasBody.matchAll(/data-cell-count="(\d+)"/gu)].reduce((sum, match) => sum + Number(match[1]), 0), 365);
 });
 
 test("routes fixed motion probe filenames through the built Worker", async () => {
@@ -137,12 +232,34 @@ test("renders a complete logged-out public profile streak without a contribution
       assert.equal(new Headers(init?.headers).get("authorization"), null);
       const year = Number(url.searchParams.get("from")?.slice(0, 4));
       return new Response(publicContributionHtml(year), { headers: { "content-type": "text/html; charset=utf-8" } });
-    }, () => request("/api/v1/cards/streak.svg?user=octocat&demo=false&theme=aurora&motion=none"));
+    }, () => request("/api/v1/cards/streak.svg?user=octocat&demo=false&theme=aurora&days=365&motion=none"));
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("cache-control"), "public, max-age=60, s-maxage=3600");
     const body = await response.text();
     assert.match(body, />365\+<\/text>/);
     assert.match(body, /Longest in 365-day window/);
+    assert.match(body, /earlier history not observed/);
+  } finally {
+    if (previous === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previous;
+  }
+});
+
+test("renders a two-year logged-out public profile streak without a contribution token", async () => {
+  const previous = process.env.GITHUB_TOKEN;
+  delete process.env.GITHUB_TOKEN;
+  try {
+    const response = await withMockedFetch(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      assert.equal(url.origin, "https://github.com");
+      assert.equal(new Headers(init?.headers).get("authorization"), null);
+      const year = Number(url.searchParams.get("from")?.slice(0, 4));
+      return new Response(publicContributionHtml(year), { headers: { "content-type": "text/html; charset=utf-8" } });
+    }, () => request("/api/v1/cards/streak.svg?user=octocat&demo=false&theme=aurora&days=730&motion=none"));
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.match(body, />730\+<\/text>/);
+    assert.match(body, /Longest in 730-day window/);
     assert.match(body, /earlier history not observed/);
   } finally {
     if (previous === undefined) delete process.env.GITHUB_TOKEN;
@@ -366,6 +483,26 @@ test("renders empty languages and partial projects without inventing actions or 
   assert.doesNotMatch(projectsBody, /<a\b|Install|Download|Docs/);
 });
 
+test("serves the evidence-coverage scene through the built worker", async () => {
+  const response = await request("/api/v1/scenes/evidence-coverage.svg?user=octocat&demo=true");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "image/svg+xml; charset=utf-8");
+  assert.match(response.headers.get("etag") ?? "", /^W\/"[a-f\d]{64}"$/);
+  assert.equal(response.headers.get("cache-control"), "public, max-age=60, s-maxage=300");
+  assert.match(response.headers.get("content-security-policy") ?? "", /style-src 'none'/);
+  const body = await response.text();
+  assert.match(body, /<title>Evidence coverage<\/title>/);
+  assert.doesNotMatch(body, /<script|foreignObject/i);
+
+  const missing = await request("/api/v1/scenes/not-a-scene.svg?user=octocat&demo=true");
+  assert.equal(missing.status, 404);
+  assert.equal((await missing.json()).error.code, "github_not_found");
+
+  const cinematic = await request("/api/v1/scenes/evidence-coverage.svg?user=octocat&demo=true&motion=cinematic");
+  assert.equal(cinematic.status, 400);
+  assert.equal((await cinematic.json()).error.code, "invalid_input");
+});
+
 async function withMockedFetch(fetchImpl, operation) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = fetchImpl;
@@ -374,6 +511,38 @@ async function withMockedFetch(fetchImpl, operation) {
   } finally {
     globalThis.fetch = originalFetch;
   }
+}
+
+async function tokenCacheGitHubFixture(input, init) {
+  const url = new URL(input instanceof Request ? input.url : String(input));
+  assert.equal(url.origin, "https://api.github.com");
+  assert.equal(new Headers(init?.headers).get("authorization"), "Bearer ghp_public-cache-fixture");
+  if (url.pathname === "/rate_limit") return new Response("{}", { headers: { "x-oauth-scopes": "" } });
+  if (url.pathname === "/users/octocat") return githubJson({
+    login: "octocat", name: "Octocat", public_repos: 1, followers: 2, following: 3,
+  });
+  const repository = {
+    name: "atlas", private: false, stargazers_count: 3, forks_count: 1,
+    open_issues_count: 2, language: "TypeScript", pushed_at: "2026-01-01T00:00:00Z",
+    default_branch: "main", html_url: "https://github.com/octocat/atlas",
+  };
+  if (url.pathname === "/users/octocat/repos") return githubJson([repository]);
+  if (url.pathname === "/repos/octocat/atlas") return githubJson(repository);
+  if (url.pathname === "/repos/octocat/atlas/releases/latest") return githubJson({}, 404);
+  if (url.pathname === "/graphql") {
+    const { variables } = JSON.parse(String(init?.body));
+    const days = [];
+    for (let date = variables.from.slice(0, 10); date <= variables.to.slice(0, 10); date = shiftUtcDate(date, 1)) {
+      days.push({ date, contributionCount: 1, contributionLevel: "FIRST_QUARTILE" });
+    }
+    return githubJson({ data: { user: { contributionsCollection: {
+      totalCommitContributions: days.length, totalIssueContributions: 0,
+      totalPullRequestContributions: 0, totalPullRequestReviewContributions: 0,
+      hasAnyRestrictedContributions: false, restrictedContributionsCount: 0,
+      contributionCalendar: { weeks: [{ contributionDays: days }] },
+    } } } });
+  }
+  assert.fail(`unexpected GitHub fixture request ${url.pathname}`);
 }
 
 function githubJson(payload, status = 200) {

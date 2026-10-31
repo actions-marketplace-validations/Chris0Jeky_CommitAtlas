@@ -1,5 +1,8 @@
+import { hasDirectRateLimitEvidence, rateLimitMessage, rateLimitRetryAfterValue, retryAfterValue } from "./rate-limit.js";
 import {
+  AUTO_WINDOW_DAYS,
   parseContributionCalendar,
+  resolveAutoWindow,
   type CiObservation,
 } from "@commit-atlas/core";
 import {
@@ -20,7 +23,10 @@ import type {
   ProjectWorkflow,
 } from "./types.js";
 import {
+  InputError,
   isRecord,
+  parseGitHubHandle,
+  parseRepositoryNames,
   safeHttpsUrl,
   stringField as rawStringField,
 } from "./validation.js";
@@ -33,6 +39,9 @@ const OPTIONAL_LOOKUP_UNAVAILABLE = Symbol("optional-lookup-unavailable");
 const MAX_RESPONSE_BYTES = 1_500_000;
 const REQUEST_DEADLINE_MS = 12_000;
 const PROJECT_CONCURRENCY = 2;
+const PROFILE_REPOSITORY_PAGE_CAP = 5;
+const UTC_DAY_MS = 86_400_000;
+const CONTRIBUTION_QUERY_DAYS = 365;
 const GITHUB_TEXT_LIMITS = {
   profileLogin: 39,
   profileName: 200,
@@ -53,7 +62,7 @@ const GITHUB_TEXT_LIMITS = {
 
 export class GitHubApiError extends Error {
   constructor(
-    readonly code: "github_unavailable" | "github_rate_limited" | "github_not_found" | "token_required" | "invalid_response" | "private_data",
+    readonly code: "github_unavailable" | "github_timeout" | "github_auth_required" | "github_forbidden" | "github_rate_limited" | "github_not_found" | "token_required" | "invalid_response" | "private_data",
     message: string,
     readonly status = 502,
     readonly retryAfter: string | null = null,
@@ -84,6 +93,7 @@ export class GitHubClient {
   }
 
   async fetchProfile(login: string): Promise<ProfileSnapshot> {
+    login = parseGitHubHandle(login);
     const [user, repositories] = await Promise.all([
       this.getJson(`/users/${encodeURIComponent(login)}`),
       this.getJson(`/users/${encodeURIComponent(login)}/repos?type=owner&sort=updated&per_page=100`),
@@ -95,10 +105,28 @@ export class GitHubClient {
     if (repositories.some((repository) => !isRecord(repository))) {
       throw new GitHubApiError("invalid_response", "GitHub returned an invalid repository list");
     }
-    const parsedRepositories = repositories;
+    const parsedRepositories = [...repositories];
+    let lastPageLength = repositories.length;
+    // shortcut: at most 500 repositories within the shared deadline; revisit the budget when larger complete profiles are required.
+    for (let page = 2; lastPageLength === 100 && page <= PROFILE_REPOSITORY_PAGE_CAP; page++) {
+      let nextPage: unknown;
+      try {
+        nextPage = await this.getJson(`/users/${encodeURIComponent(login)}/repos?type=owner&sort=updated&per_page=100&page=${page}`);
+      } catch (error) {
+        // A later page that GitHub cannot serve degrades the totals to partial; page 1 already succeeded.
+        if (error instanceof GitHubApiError && (error.code === "github_unavailable" || error.code === "github_timeout" || error.code === "github_rate_limited")) break;
+        throw error;
+      }
+      if (!Array.isArray(nextPage) || nextPage.some((repository) => !isRecord(repository))) {
+        throw new GitHubApiError("invalid_response", "GitHub returned an invalid repository list");
+      }
+      parsedRepositories.push(...nextPage);
+      lastPageLength = nextPage.length;
+    }
     if (parsedRepositories.some((repository) => repository.private === true)) {
       throw privateDataError("GitHub returned a private repository in a public profile response");
     }
+    const repositoriesTruncated = lastPageLength === 100 || requiredMetric(user, "public_repos") > parsedRepositories.length;
     const languageCounts = new Map<string, number>();
     let stars = 0;
     let forks = 0;
@@ -125,16 +153,17 @@ export class GitHubClient {
       forks,
       primaryLanguages: toLanguageSignals(languageCounts),
       latestPushAt,
-      repositoriesTruncated: requiredMetric(user, "public_repos") > parsedRepositories.length,
+      repositoriesTruncated,
       freshness: {
         generatedAt: this.now().toISOString(),
         source: "github-rest",
-        mode: "live",
+        mode: repositoriesTruncated ? "partial" : "live",
       },
     };
   }
 
-  async fetchContributions(login: string, days = 365): Promise<ContributionSnapshot> {
+  async fetchContributions(login: string, days: number | "auto" = 365): Promise<ContributionSnapshot> {
+    login = parseGitHubHandle(login);
     if (!this.token) {
       throw new GitHubApiError(
         "token_required",
@@ -142,77 +171,110 @@ export class GitHubClient {
         503,
       );
     }
-    const requestedDays = Math.min(Math.max(days, 1), 365);
+    const requestedDays = days === "auto" ? AUTO_WINDOW_DAYS : Math.min(Math.max(days, 1), 730);
     const to = this.now();
     const from = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate()));
     from.setUTCDate(from.getUTCDate() - (requestedDays - 1));
 
-    const payload = await this.graphql(CONTRIBUTIONS_QUERY, {
-      login,
-      from: from.toISOString(),
-      to: to.toISOString(),
-    });
-    const user = nestedRecord(payload, "data", "user");
-    const collection = user && isRecord(user.contributionsCollection)
-      ? user.contributionsCollection
-      : null;
-    const calendar = collection && isRecord(collection.contributionCalendar)
-      ? collection.contributionCalendar
-      : null;
-    if (!collection || !calendar) {
-      throw new GitHubApiError("invalid_response", "GitHub returned no contribution calendar");
-    }
-    assertPublicContributionCollection(collection);
+    const allDays: ContributionDay[] = [];
+    const totals = {
+      totalCommitContributions: 0,
+      totalIssueContributions: 0,
+      totalPullRequestContributions: 0,
+      totalPullRequestReviewContributions: 0,
+    };
+    // GitHub rejects collections spanning more than one year. Bound each
+    // slice below 365 elapsed days, including leap years, with no overlapping
+    // instants or UTC dates. The same client retains its original deadline
+    // and cached public-only credential proof across at most three requests.
+    for (let start = from.getTime(); start <= to.getTime(); start += CONTRIBUTION_QUERY_DAYS * UTC_DAY_MS) {
+      const sliceFrom = new Date(start);
+      const sliceTo = new Date(Math.min(start + CONTRIBUTION_QUERY_DAYS * UTC_DAY_MS - 1, to.getTime()));
+      const payload = await this.graphql(CONTRIBUTIONS_QUERY, {
+        login,
+        from: sliceFrom.toISOString(),
+        to: sliceTo.toISOString(),
+      });
+      const user = nestedRecord(payload, "data", "user");
+      const collection = user && isRecord(user.contributionsCollection)
+        ? user.contributionsCollection
+        : null;
+      const calendar = collection && isRecord(collection.contributionCalendar)
+        ? collection.contributionCalendar
+        : null;
+      if (!collection || !calendar) {
+        throw new GitHubApiError("invalid_response", "GitHub returned no contribution calendar");
+      }
+      assertPublicContributionCollection(collection);
 
-    if (!Array.isArray(calendar.weeks) || calendar.weeks.some((week) => !isRecord(week))) {
-      throw new GitHubApiError("invalid_response", "GitHub returned an invalid contribution calendar");
-    }
-    const weeks = calendar.weeks as Record<string, unknown>[];
-    const contributionDays: ContributionDay[] = [];
-    for (const week of weeks) {
-      if (!Array.isArray(week.contributionDays) || week.contributionDays.some((day) => !isRecord(day))) {
-        throw new GitHubApiError("invalid_response", "GitHub returned invalid contribution days");
+      if (!Array.isArray(calendar.weeks) || calendar.weeks.some((week) => !isRecord(week))) {
+        throw new GitHubApiError("invalid_response", "GitHub returned an invalid contribution calendar");
       }
-      const weekDays = week.contributionDays as Record<string, unknown>[];
-      for (const day of weekDays) {
-        const date = textField(day, "date", GITHUB_TEXT_LIMITS.contributionDate);
-        if (!date) throw new GitHubApiError("invalid_response", "GitHub returned a contribution day without a date");
-        contributionDays.push({
-          date,
-          count: requiredMetric(day, "contributionCount"),
-          level: contributionLevel(day.contributionLevel),
-        });
+      const contributionDays: ContributionDay[] = [];
+      for (const week of calendar.weeks as Record<string, unknown>[]) {
+        if (!Array.isArray(week.contributionDays) || week.contributionDays.some((day) => !isRecord(day))) {
+          throw new GitHubApiError("invalid_response", "GitHub returned invalid contribution days");
+        }
+        for (const day of week.contributionDays as Record<string, unknown>[]) {
+          const date = textField(day, "date", GITHUB_TEXT_LIMITS.contributionDate);
+          if (!date) throw new GitHubApiError("invalid_response", "GitHub returned a contribution day without a date");
+          contributionDays.push({ date, count: requiredMetric(day, "contributionCount"), level: contributionLevel(day.contributionLevel) });
+        }
       }
+
+      let sliceDays: ContributionDay[] = [];
+      if (contributionDays.length > 0) {
+        try {
+          sliceDays = parseContributionCalendar({ version: 1, days: contributionDays }).days;
+        } catch {
+          throw new GitHubApiError("invalid_response", "GitHub returned an invalid contribution calendar");
+        }
+      }
+      const first = sliceFrom.toISOString().slice(0, 10);
+      const last = sliceTo.toISOString().slice(0, 10);
+      if (sliceDays.some(({ date }) => date > last)) {
+        throw new GitHubApiError("invalid_response", "GitHub returned a contribution day after the requested end date");
+      }
+      sliceDays = sliceDays.filter(({ date }) => date >= first);
+      if (days !== "auto") {
+        const sliceLength = Math.floor((sliceTo.getTime() - start) / UTC_DAY_MS) + 1;
+        assertRequestedContributionWindow(sliceDays, sliceTo, sliceLength);
+      }
+      for (const key of Object.keys(totals) as (keyof typeof totals)[]) {
+        const value = requiredMetric(collection, key);
+        if (sliceDays.length === 0 && value !== 0) {
+          throw new GitHubApiError("invalid_response", "GitHub returned contribution counts without observed days");
+        }
+        const total = totals[key] + value;
+        if (!Number.isSafeInteger(total)) {
+          throw new GitHubApiError("invalid_response", `GitHub returned an unsafe combined ${key} metric`);
+        }
+        totals[key] = total;
+      }
+      allDays.push(...sliceDays);
     }
 
     let calendarDays: ContributionDay[];
     try {
-      calendarDays = parseContributionCalendar({ version: 1, days: contributionDays }).days;
+      calendarDays = parseContributionCalendar({ version: 1, days: allDays }).days;
     } catch {
       throw new GitHubApiError("invalid_response", "GitHub returned an invalid contribution calendar");
     }
-    const requestedFrom = from.toISOString().slice(0, 10);
-    const requestedTo = to.toISOString().slice(0, 10);
-    if (calendarDays.some(({ date }) => date > requestedTo)) {
-      throw new GitHubApiError("invalid_response", "GitHub returned a contribution day after the requested end date");
-    }
-    calendarDays = calendarDays.filter(({ date }) => date >= requestedFrom && date <= requestedTo);
-    assertRequestedContributionWindow(calendarDays, to, requestedDays);
+    // Validate before trimming so inactive prefixes cannot hide missing days.
+    // Auto may have a shorter observed history, but not holes or a stale end.
+    assertRequestedContributionWindow(calendarDays, to, days === "auto" ? calendarDays.length : requestedDays);
+    if (days === "auto") calendarDays = trimContributionCalendar(calendarDays);
     return {
       version: 1,
       login,
       totalContributions: calendarDays.reduce((total, day) => total + day.count, 0),
-      commits: requiredMetric(collection, "totalCommitContributions"),
-      issues: requiredMetric(collection, "totalIssueContributions"),
-      pullRequests: requiredMetric(collection, "totalPullRequestContributions"),
-      reviews: requiredMetric(collection, "totalPullRequestReviewContributions"),
+      commits: totals.totalCommitContributions,
+      issues: totals.totalIssueContributions,
+      pullRequests: totals.totalPullRequestContributions,
+      reviews: totals.totalPullRequestReviewContributions,
       breakdownBasis: "exact-counts",
       days: calendarDays.map(({ date, count, level }) => ({ date, count, level })),
-      freshness: {
-        generatedAt: to.toISOString(),
-        source: "github-graphql",
-        mode: "live",
-      },
+      freshness: { generatedAt: to.toISOString(), source: "github-graphql", mode: "live" },
     };
   }
 
@@ -222,8 +284,9 @@ export class GitHubClient {
    * also has one for another operation. The activity breakdown is the
    * percentage mix published by that view, not a fabricated exact count.
    */
-  async fetchPublicProfileContributions(login: string, days = 365): Promise<ContributionSnapshot> {
-    const requestedDays = Math.min(Math.max(days, 1), 365);
+  async fetchPublicProfileContributions(login: string, days: number | "auto" = 365): Promise<ContributionSnapshot> {
+    login = parseGitHubHandle(login);
+    const requestedDays = days === "auto" ? AUTO_WINDOW_DAYS : Math.min(Math.max(days, 1), 730);
     const to = this.now();
     const toDate = to.toISOString().slice(0, 10);
     const from = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate()));
@@ -241,14 +304,31 @@ export class GitHubClient {
       if (url.origin !== WEB_ORIGIN || !url.pathname.startsWith("/users/")) {
         throw new GitHubApiError("invalid_response", "Refused a non-GitHub profile target");
       }
-      const response = await this.fetchWithDeadline(url, {
+      const init: RequestInit = {
         redirect: "error",
         headers: new Headers({
           Accept: "text/html",
           "Accept-Language": "en-US,en;q=0.9",
           "User-Agent": "CommitAtlas/0.2 (+https://github.com/Chris0Jeky/CommitAtlas)",
         }),
-      });
+      };
+      let response = await this.fetchWithDeadline(url, init);
+      // GitHub's public calendar can return a transient backend 503 even
+      // while the profile and other years are available. Retry that GET once,
+      // within the original shared budget; never retry refusals or bad markup.
+      if (response.status === 503) {
+        // Transport scheduling follows wall time, independently of an as-of
+        // snapshot clock, which static generation deliberately freezes.
+        const retryAfter = retryAfterValue(response.headers, new Date(Date.now()));
+        const delayMs = retryAfter === null ? 1_000 : /^\d+$/.test(retryAfter)
+          ? Number(retryAfter) * 1_000
+          : Math.max(0, Date.parse(retryAfter) - Date.now());
+        if (delayMs < this.remainingDeadline()) {
+          await response.body?.cancel();
+          await this.withRemainingDeadline(new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+          response = await this.fetchWithDeadline(url, init);
+        }
+      }
       const html = await this.readHtmlResponse(response);
       return parsePublicContributionPage(html, year);
     }));
@@ -263,8 +343,12 @@ export class GitHubClient {
         byDate.set(day.date, day);
       }
     }
-    const calendarDays = [...byDate.values()].sort((left, right) => left.date.localeCompare(right.date));
-    assertRequestedContributionWindow(calendarDays, to, requestedDays);
+    let calendarDays = [...byDate.values()].sort((left, right) => left.date.localeCompare(right.date));
+    if (days === "auto") {
+      calendarDays = trimContributionCalendar(calendarDays);
+    } else {
+      assertRequestedContributionWindow(calendarDays, to, requestedDays);
+    }
     const totalContributions = calendarDays.reduce((total, day) => total + day.count, 0);
     const weightedMix = weightedPublicActivityMix(pages, fromDate, toDate);
 
@@ -292,6 +376,9 @@ export class GitHubClient {
     lifecycles: ReadonlyMap<string, ProjectLifecycle>,
     workflows: ReadonlyMap<string, ProjectWorkflow> = new Map(),
   ): Promise<ProjectBoardSnapshot> {
+    owner = parseGitHubHandle(owner, "owner");
+    if (!Array.isArray(repositories)) throw new InputError("repos must be an array of repository names");
+    repositories = repositories.length > 0 ? parseRepositoryNames(repositories) : [];
     for (const repository of repositories) {
       const lifecycle = lifecycles.get(repository.toLowerCase());
       if (!lifecycle) {
@@ -327,7 +414,7 @@ export class GitHubClient {
     if (!isRecord(repo)) throw new GitHubApiError("invalid_response", "GitHub returned an invalid repository");
     if (repo.private === true) throw privateDataError("CommitAtlas only serves public GitHub repositories");
 
-    const defaultBranch = textField(repo, "default_branch", GITHUB_TEXT_LIMITS.branch) ?? "main";
+    const defaultBranch = textField(repo, "default_branch", GITHUB_TEXT_LIMITS.branch) ?? "";
     const [releaseObservation, ci] = await Promise.all([
       this.fetchLatestRelease(owner, repository),
       configuredWorkflow
@@ -400,18 +487,31 @@ export class GitHubClient {
     branch: string,
     workflow: ProjectWorkflow,
   ): Promise<ProjectCiSignal> {
+    const unavailable = () => toJsonCiSignal(
+      calculateGitHubCiState({ available: false, configured: true }, this.now()), workflow, null, null,
+    );
+    // Bind the workflow to the observed default-branch tip, not merely to its name.
+    // No guessed branch and no additional request when CI is unconfigured.
+    if (!branch) return unavailable();
+    const tip = await this.getJson(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/branches/${encodeURIComponent(branch)}`,
+      true,
+    );
+    if (!isRecord(tip) || tip.name !== branch || !isRecord(tip.commit) ||
+      typeof tip.commit.sha !== "string" || !/^[a-f\d]{40}$/iu.test(tip.commit.sha)) return unavailable();
+    const headSha = tip.commit.sha.toLowerCase();
     const result = await this.getJson(
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/actions/workflows/${encodeURIComponent(workflow)}/runs?branch=${encodeURIComponent(branch)}&per_page=1&exclude_pull_requests=true`,
       true,
     );
-    if (result === null || result === OPTIONAL_LOOKUP_UNAVAILABLE || !isRecord(result)) {
+    if (!isRecord(result)) {
       return toJsonCiSignal(calculateGitHubCiState({ available: false, configured: true }, this.now()), workflow, null, null);
     }
     // A 200 whose workflow_runs is missing or not an array is an unreadable
     // observation, not an observed absence of runs. Report it as unavailable so
     // a malformed payload can never present as configured-and-clean or as
-    // "Not configured".
-    if (!Array.isArray(result.workflow_runs)) {
+    // "Not configured". A mixed array containing any non-object entry is likewise unreadable.
+    if (!Array.isArray(result.workflow_runs) || result.workflow_runs.some((entry) => !isRecord(entry))) {
       return toJsonCiSignal(calculateGitHubCiState({ available: false, configured: true }, this.now()), workflow, null, null);
     }
     const runs = result.workflow_runs.filter(isRecord);
@@ -419,12 +519,15 @@ export class GitHubClient {
     if (!run) {
       return toJsonCiSignal(calculateGitHubCiState({ available: true, configured: true }, this.now()), workflow, null, null);
     }
+    // Ignore even successful, failed or pending runs for another revision.
+    // Do not attach their timestamps or URLs to the current-head signal.
+    if (typeof run.head_sha !== "string" || run.head_sha.length !== 40 || run.head_sha.toLowerCase() !== headSha) return unavailable();
     const status = calculateGitHubCiState(workflowObservation(run), this.now());
     return toJsonCiSignal(
       status,
       workflow,
       safeHttpsUrl(run.html_url),
-      textField(run, "head_sha", GITHUB_TEXT_LIMITS.commitSha),
+      headSha,
     );
   }
 
@@ -441,7 +544,7 @@ export class GitHubClient {
     if (!isRecord(payload)) {
       throw new GitHubApiError("invalid_response", "GitHub returned an invalid GraphQL response");
     }
-    assertGraphqlPayload(payload);
+    assertGraphqlPayload(payload, response.headers, this.now());
     return payload;
   }
 
@@ -461,10 +564,11 @@ export class GitHubClient {
     const response = await this.fetchWithDeadline(new URL("/rate_limit", API_ORIGIN), {
       headers: this.headers(),
     });
+    if (!response.ok) throw await this.transportError(response, "GitHub data is currently unavailable");
     const hasScopeEvidence = response.headers.has("x-oauth-scopes");
     const scopes = response.headers.get("x-oauth-scopes");
     await response.body?.cancel();
-    if (!response.ok || !hasScopeEvidence || !hasOnlyPublicClassicScopes(token, scopes)) {
+    if (!hasScopeEvidence || !hasOnlyPublicClassicScopes(token, scopes)) {
       throw privateDataError("Public GitHub routes require a token with explicit public-only classic OAuth scopes");
     }
   }
@@ -505,7 +609,7 @@ export class GitHubClient {
     }
     if (!response.ok) {
       const error = await this.transportError(response, "GitHub data is currently unavailable");
-      if (allowMissing && response.status === 403 && error.code === "github_unavailable") {
+      if (allowMissing && response.status === 403 && error.code === "github_forbidden") {
         return OPTIONAL_LOOKUP_UNAVAILABLE;
       }
       throw error;
@@ -527,7 +631,7 @@ export class GitHubClient {
 
   private async readHtmlResponse(response: Response): Promise<string> {
     if (!response.ok) {
-      throw await this.transportError(response, "GitHub public profile is currently unavailable");
+      throw await this.transportError(response, `GitHub public profile is currently unavailable (HTTP ${response.status})`);
     }
     const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
     if (contentType && !contentType.startsWith("text/html")) {
@@ -542,18 +646,14 @@ export class GitHubClient {
     return this.readBoundedText(response);
   }
 
-  /**
-   * Keep the three upstream failure meanings separate: a rate limit carries
-   * retry guidance, a 404 is the non-disclosing not-found contract, and every
-   * other failure stays an upstream outage.
-   */
+  /** Classify upstream refusals without returning GitHub response bodies. */
   private async transportError(response: Response, unavailableMessage: string): Promise<GitHubApiError> {
     if (response.status === 403) {
       const headerEvidence = hasDirectRateLimitEvidence(response.headers, this.now());
       const messageEvidence = headerEvidence ? false : await this.hasRateLimitMessage(response);
       if (headerEvidence) await response.body?.cancel();
       if (!headerEvidence && !messageEvidence) {
-        return new GitHubApiError("github_unavailable", unavailableMessage, 502);
+        return forbiddenError();
       }
       return new GitHubApiError(
         "github_rate_limited",
@@ -563,6 +663,7 @@ export class GitHubClient {
       );
     }
     await response.body?.cancel();
+    if (response.status === 401) return authRequiredError(retryAfterValue(response.headers, this.now()));
     if (response.status === 429) {
       return new GitHubApiError(
         "github_rate_limited",
@@ -594,7 +695,8 @@ export class GitHubClient {
       return await this.withRemainingDeadline(this.fetchImpl(input, { ...init, signal: timeout }));
     } catch (error) {
       if (error instanceof GitHubApiError) throw error;
-      throw new GitHubApiError("github_unavailable", "GitHub did not respond before the request deadline");
+      if (timeout.aborted) throw deadlineError();
+      throw new GitHubApiError("github_unavailable", "GitHub could not be reached");
     }
   }
 
@@ -625,9 +727,10 @@ export class GitHubClient {
         chunks.push(value);
       }
     } catch (error) {
-      await reader.cancel();
+      await reader.cancel().catch(() => undefined);
       if (error instanceof GitHubApiError) throw error;
-      throw new GitHubApiError("github_unavailable", "GitHub did not respond before the request deadline");
+      if (Date.now() >= this.deadlineAt) throw deadlineError();
+      throw new GitHubApiError("github_unavailable", "GitHub response could not be read");
     }
     try {
       return new TextDecoder("utf-8", { fatal: true }).decode(concatChunks(chunks, byteLength));
@@ -643,7 +746,7 @@ export class GitHubClient {
       return await Promise.race([
         operation,
         new Promise<T>((_, reject) => {
-          timeout = setTimeout(() => reject(new GitHubApiError("github_unavailable", "GitHub did not respond before the request deadline")), remaining);
+          timeout = setTimeout(() => reject(deadlineError()), remaining);
         }),
       ]);
     } finally {
@@ -654,7 +757,7 @@ export class GitHubClient {
   private remainingDeadline(): number {
     const remaining = this.deadlineAt - Date.now();
     if (remaining <= 0) {
-      throw new GitHubApiError("github_unavailable", "GitHub did not respond before the request deadline");
+      throw deadlineError();
     }
     return remaining;
   }
@@ -699,16 +802,40 @@ function notFoundError(): GitHubApiError {
  * `errors`. Recognise exactly that shape before the generic GraphQL error path
  * so it yields the same not-found contract as every REST route. The upstream
  * message quotes the login that was probed, so it is discarded in favour of the
- * one shared not-found message. Any other error, or a mix, stays an outage.
+ * one shared not-found message. Other errors receive a bounded upstream classification.
  */
-function assertGraphqlPayload(payload: Record<string, unknown>): void {
+function assertGraphqlPayload(payload: Record<string, unknown>, headers: Headers, now: Date): void {
   const errors = Array.isArray(payload.errors) ? payload.errors : [];
   const missingUser = isRecord(payload.data) && payload.data.user === null;
   const onlyNotFound = errors.every((error) => isRecord(error) && error.type === "NOT_FOUND");
   if (missingUser && onlyNotFound) throw notFoundError();
   if (errors.length > 0) {
+    for (const error of errors) {
+      if (!isRecord(error)) continue;
+      const type = error.type ?? (isRecord(error.extensions) ? error.extensions.code : undefined);
+      const message = typeof error.message === "string" ? error.message : "";
+      if (type === "RATE_LIMITED" || rateLimitMessage(message)) {
+        throw new GitHubApiError("github_rate_limited", "GitHub rate limit reached; retry after the reset window",
+          429, rateLimitRetryAfterValue(headers, now));
+      }
+      if (type === "UNAUTHORIZED" || type === "UNAUTHENTICATED"
+          || /\brequires (?:you to be )?authenticat(?:ed|ion)\b/i.test(message)) throw authRequiredError();
+      if (type === "FORBIDDEN") throw forbiddenError();
+    }
     throw new GitHubApiError("github_unavailable", "GitHub could not satisfy the requested data", 502);
   }
+}
+
+function deadlineError(): GitHubApiError {
+  return new GitHubApiError("github_timeout", "GitHub did not respond before the request deadline");
+}
+
+function authRequiredError(retryAfter: string | null = null): GitHubApiError {
+  return new GitHubApiError("github_auth_required", "GitHub requires valid server-side authentication", 502, retryAfter);
+}
+
+function forbiddenError(): GitHubApiError {
+  return new GitHubApiError("github_forbidden", "GitHub refused access to the requested data");
 }
 
 function hasOnlyPublicClassicScopes(token: string, scopes: string | null): boolean {
@@ -737,99 +864,9 @@ function textField(record: Record<string, unknown>, key: string, maxCodePoints: 
   return value;
 }
 
-function retryAfterValue(headers: Headers, now: Date): string | null {
-  const retryAfter = headers.get("retry-after");
-  if (retryAfter !== null) {
-    const normalizedRetryAfter = retryAfter.trim();
-    if (/^\d+$/.test(normalizedRetryAfter) || isHttpDate(normalizedRetryAfter, now)) {
-      return normalizedRetryAfter;
-    }
-  }
-
-  const reset = headers.get("x-ratelimit-reset");
-  const normalizedReset = reset?.trim() ?? "";
-  if (!/^\d+$/.test(normalizedReset)) return null;
-  const resetEpoch = Number(normalizedReset);
-  if (!Number.isSafeInteger(resetEpoch)) return null;
-  const nowEpoch = Math.floor(now.getTime() / 1000);
-  return String(Math.max(0, resetEpoch - nowEpoch));
-}
-
-function rateLimitRetryAfterValue(headers: Headers, now: Date): string {
-  return retryAfterValue(headers, now) ?? "60";
-}
-
-function hasDirectRateLimitEvidence(headers: Headers, now: Date): boolean {
-  const retryAfter = headers.get("retry-after")?.trim() ?? "";
-  const validRetryAfter = /^\d+$/.test(retryAfter) || (retryAfter !== "" && isHttpDate(retryAfter, now));
-  return validRetryAfter || headers.get("x-ratelimit-remaining")?.trim() === "0";
-}
-
-function rateLimitMessage(body: string): boolean {
-  let message = body;
-  try {
-    const payload = JSON.parse(body) as unknown;
-    if (!isRecord(payload) || typeof payload.message !== "string") return false;
-    message = payload.message;
-  } catch {
-    // GitHub normally sends JSON, but a bounded plain-text proxy response can
-    // still carry the same explicit rate-limit evidence.
-  }
-  return /\b(?:rate[\s-]*limit(?:ed)?|secondary[\s-]+limit(?:ed)?|abuse detection)\b/i.test(message);
-}
-
-const SHORT_WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
-const LONG_WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
-
-function isHttpDate(value: string, now: Date): boolean {
-  const imf = /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat), (\d{2}) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{4}) (\d{2}):(\d{2}):(\d{2}) GMT$/.exec(value);
-  if (imf) return matchesUtcDate(imf[1]!, imf[4]!, imf[3]!, imf[2]!, imf[5]!, imf[6]!, imf[7]!);
-
-  const rfc850 = /^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday), (\d{2})-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-(\d{2}) (\d{2}):(\d{2}):(\d{2}) GMT$/.exec(value);
-  if (rfc850) {
-    let year = 2000 + Number(rfc850[4]);
-    if (year > now.getUTCFullYear() + 50) year -= 100;
-    const weekday = SHORT_WEEKDAYS[LONG_WEEKDAYS.indexOf(rfc850[1] as typeof LONG_WEEKDAYS[number])];
-    return matchesUtcDate(weekday!, String(year), rfc850[3]!, rfc850[2]!, rfc850[5]!, rfc850[6]!, rfc850[7]!);
-  }
-
-  const asctime = /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (?:(\d{2})| (\d)) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/.exec(value);
-  return Boolean(asctime && matchesUtcDate(
-    asctime[1]!, asctime[8]!, asctime[2]!, asctime[3] ?? asctime[4]!, asctime[5]!, asctime[6]!, asctime[7]!,
-  ));
-}
-
-function matchesUtcDate(
-  weekday: string,
-  yearText: string,
-  monthText: string,
-  dayText: string,
-  hourText: string,
-  minuteText: string,
-  secondText: string,
-): boolean {
-  const year = Number(yearText);
-  const month = MONTHS.indexOf(monthText as typeof MONTHS[number]);
-  const day = Number(dayText);
-  const hour = Number(hourText);
-  const minute = Number(minuteText);
-  const second = Number(secondText);
-  if (month < 0 || hour > 23 || minute > 59 || second > 60) return false;
-
-  const date = new Date(Date.UTC(year, month, day, hour, minute, Math.min(second, 59)));
-  return date.getUTCFullYear() === year
-    && date.getUTCMonth() === month
-    && date.getUTCDate() === day
-    && date.getUTCHours() === hour
-    && date.getUTCMinutes() === minute
-    && date.getUTCSeconds() === Math.min(second, 59)
-    && SHORT_WEEKDAYS[date.getUTCDay()] === weekday;
-}
-
 function requiredMetric(record: Record<string, unknown>, key: string): number {
   const value = record[key];
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || !Number.isSafeInteger(value)) {
     throw new GitHubApiError("invalid_response", `GitHub returned an invalid ${key} metric`);
   }
   return value;
@@ -964,7 +1001,23 @@ function contributionLevel(value: unknown): number {
     THIRD_QUARTILE: 3,
     FOURTH_QUARTILE: 4,
   };
-  return typeof value === "string" ? levels[value] ?? 0 : 0;
+  // An absent field keeps the historical level 0 (the query requests it and GitHub's schema makes it
+  // non-null, so only hand-written fixtures omit it); a present value outside the enum - a new or
+  // renamed quartile, null, another type - is an upstream contract change and fails closed.
+  if (value === undefined) return 0;
+  const level = typeof value === "string" && Object.hasOwn(levels, value) ? levels[value] : undefined;
+  if (level === undefined) {
+    throw new GitHubApiError("invalid_response", "GitHub returned an unknown contribution level");
+  }
+  return level;
+}
+
+function trimContributionCalendar(calendarDays: ContributionDay[]): ContributionDay[] {
+  try {
+    return calendarDays.slice(-resolveAutoWindow(calendarDays));
+  } catch {
+    throw new GitHubApiError("invalid_response", "GitHub returned an empty contribution calendar");
+  }
 }
 
 function assertRequestedContributionWindow(

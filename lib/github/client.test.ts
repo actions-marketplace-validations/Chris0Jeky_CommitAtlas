@@ -1,10 +1,159 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { GitHubApiError, GitHubClient } from "./client";
+import { InputError } from "./validation";
+import { apiErrorResponse } from "../http";
 
+const HEAD_SHA = "a".repeat(40);
 const NOW = new Date("2026-08-19T00:00:00.000Z");
 const LIFECYCLES = new Map([["atlas", "active" as const], ["old", "maintenance" as const]]);
 const WORKFLOWS = new Map([["atlas", "ci.yml"], ["old", "ci.yml"]]);
+
+const IDENTIFIER_OPERATIONS = [
+  ["profile", (client: GitHubClient, login: string) => client.fetchProfile(login)],
+  ["GraphQL contributions", (client: GitHubClient, login: string) => client.fetchContributions(login, 1)],
+  ["public contributions", (client: GitHubClient, login: string) => client.fetchPublicProfileContributions(login, 1)],
+  ["projects", (client: GitHubClient, owner: string) => client.fetchProjects(owner, ["atlas"], LIFECYCLES)],
+] as const;
+
+for (const [label, operation] of IDENTIFIER_OPERATIONS) {
+  test(`rejects invalid ${label} handles before any GitHub request`, async () => {
+    for (const token of [undefined, "ghp_public-only"]) {
+      for (const input of ["", " ", "-owner", "owner-", "a--b", "bad/raw-identity", "owner?query", "owner\u0000", "é", "a".repeat(40), null, 42]) {
+        let requests = 0;
+        const client = new GitHubClient({ token, now: () => NOW, fetchImpl: async () => {
+          requests += 1;
+          return json({}, 404);
+        } });
+        await assert.rejects(operation(client, input as string), (error: unknown) => {
+          assert.ok(error instanceof InputError);
+          assert.equal(error.code, "invalid_input");
+          assert.doesNotMatch(error.message, /raw-identity/);
+          return true;
+        }, `${label}: ${JSON.stringify(input)}`);
+        assert.equal(requests, 0, "invalid identifiers must not spend quota on resource or credential checks");
+      }
+    }
+  });
+
+  test(`reports invalid ${label} handles even after the shared deadline expires`, async () => {
+    const client = new GitHubClient({ token: "ghp_public-only", deadlineMs: 0, fetchImpl: async () => {
+      assert.fail("invalid input must not reach transport");
+    } });
+    await assert.rejects(operation(client, "bad/raw-identity"), (error: unknown) => {
+      assert.ok(error instanceof InputError);
+      assert.equal(apiErrorResponse(error).status, 400);
+      return true;
+    });
+  });
+}
+
+test("validates every repository before starting the project batch", async () => {
+  const invalidLists = [
+    ["atlas", ""], ["atlas", " "], ["atlas", "../secret"], ["atlas", "nested/repo"],
+    ["atlas", "."], ["atlas", ".."], ["atlas", "a..b"], ["atlas", "alpha,beta"],
+    ["atlas", "repo?query"], ["atlas", "line\nbreak"], ["atlas", "répo"],
+    ["atlas", "a".repeat(101)], ["atlas", "ATLAS"], ["atlas", null],
+    ["atlas", "b", "c", "d", "e", "f", "g"],
+  ];
+  for (const token of [undefined, "ghp_public-only"]) {
+    for (const repositories of invalidLists) {
+      let requests = 0;
+      const client = new GitHubClient({ token, now: () => NOW, fetchImpl: async () => {
+        requests += 1;
+        return json({}, 404);
+      } });
+      const lifecycles = new Map(repositories.filter((repo) => typeof repo === "string")
+        .map((repo) => [repo.toLowerCase(), "active" as const]));
+      await assert.rejects(client.fetchProjects("owner", repositories as string[], lifecycles),
+        (error: unknown) => error instanceof InputError && error.code === "invalid_input",
+        JSON.stringify(repositories));
+      assert.equal(requests, 0, "a malformed later repository must not start earlier valid requests");
+    }
+  }
+});
+
+test("validates the owner even when the project list is empty", async () => {
+  const client = new GitHubClient({ now: () => NOW, fetchImpl: async () => {
+    assert.fail("an empty project board must not fetch");
+  } });
+  await assert.rejects(client.fetchProjects("bad/raw-identity", [], new Map()), InputError);
+  const board = await client.fetchProjects(" OwNeR ", [], new Map());
+  assert.equal(board.owner, "OwNeR");
+  assert.deepEqual(board.projects, []);
+});
+
+test("rejects sparse or non-array project lists before the empty-list shortcut or upstream work", async () => {
+  const sparse = new Array<string>(3);
+  sparse[0] = "atlas";
+  sparse[2] = "beta";
+  const lifecycles = new Map([["atlas", "active" as const], ["beta", "active" as const]]);
+  for (const repositories of [sparse, null, "atlas", { length: 0 }, 42]) {
+    let requests = 0;
+    const client = new GitHubClient({ fetchImpl: async () => {
+      requests += 1;
+      return json({}, 404);
+    } });
+    await assert.rejects(client.fetchProjects("owner", repositories as string[], lifecycles), InputError);
+    assert.equal(requests, 0);
+  }
+});
+
+test("uses a trimmed case-preserving login in REST requests and profile fallbacks", async () => {
+  const paths: string[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const path = new URL(input.toString()).pathname;
+    paths.push(path);
+    return path.endsWith("/repos") ? json([]) : json({ public_repos: 0, followers: 0, following: 0 });
+  };
+  const profile = await new GitHubClient({ fetchImpl, now: () => NOW }).fetchProfile(" OcTo-Cat ");
+  assert.deepEqual(paths, ["/users/OcTo-Cat", "/users/OcTo-Cat/repos"]);
+  assert.equal(profile.login, "OcTo-Cat");
+  assert.equal(profile.profileUrl, "https://github.com/OcTo-Cat");
+});
+
+test("uses a trimmed case-preserving login in GraphQL and public contribution snapshots", async () => {
+  let graphQlLogin: unknown;
+  const graphQlFetch: typeof fetch = async (input, init) => {
+    if (new URL(input.toString()).pathname === "/rate_limit") return json({}, 200, { "x-oauth-scopes": "public_repo" });
+    graphQlLogin = JSON.parse(String(init?.body)).variables.login;
+    return json(rangePayload({ from: "2026-08-19", to: "2026-08-19" }));
+  };
+  const graphQl = await new GitHubClient({ token: "ghp_public-only", fetchImpl: graphQlFetch, now: () => NOW })
+    .fetchContributions(" OcTo-Cat ", 1);
+  assert.equal(graphQlLogin, "OcTo-Cat");
+  assert.equal(graphQl.login, "OcTo-Cat");
+
+  let publicPath: string | undefined;
+  const publicFetch: typeof fetch = async (input) => {
+    publicPath = new URL(input.toString()).pathname;
+    return html(publicContributionHtml(2026, { "2026-08-19": 1 }, { Commits: 100, "Pull requests": 0, Issues: 0, "Code review": 0 }));
+  };
+  const publicSnapshot = await new GitHubClient({ fetchImpl: publicFetch, now: () => NOW })
+    .fetchPublicProfileContributions(" OcTo-Cat ", 1);
+  assert.equal(publicPath, "/users/OcTo-Cat/contributions");
+  assert.equal(publicSnapshot.login, "OcTo-Cat");
+});
+
+test("preserves valid repository casing and .git names while trimming project inputs", async () => {
+  const repositories = [" Atlas.git ", "MiXeD_Name", ".github", "repo-name", "x".repeat(100), ".git"];
+  const expectedNames = ["Atlas.git", "MiXeD_Name", ".github", "repo-name", "x".repeat(100), ".git"];
+  const paths: string[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const path = new URL(input.toString()).pathname;
+    paths.push(path);
+    if (path.endsWith("/releases/latest")) return json({}, 404);
+    return json({ stargazers_count: 0, forks_count: 0, open_issues_count: 0 });
+  };
+  const lifecycles = new Map(expectedNames.map((repo) => [repo.toLowerCase(), "active" as const]));
+  const board = await new GitHubClient({ fetchImpl, now: () => NOW }).fetchProjects(" OwNeR ", repositories, lifecycles);
+  assert.equal(board.owner, "OwNeR");
+  assert.deepEqual(board.projects.map(({ repo }) => repo), expectedNames.map((name) => `OwNeR/${name}`));
+  assert.deepEqual(board.projects.map(({ name }) => name), expectedNames);
+  assert.deepEqual(paths.sort(), expectedNames.flatMap((name) => [
+    `/repos/OwNeR/${name}`, `/repos/OwNeR/${name}/releases/latest`,
+  ]).sort());
+});
 
 test("normalizes a public profile without inventing contribution data", async () => {
   const calls: URL[] = [];
@@ -34,6 +183,115 @@ test("normalizes a public profile without inventing contribution data", async ()
   assert.equal(profile.freshness.mode, "live");
   assert.ok(calls.every((url) => url.origin === "https://api.github.com"));
   assert.deepEqual(calls.map((url) => url.pathname).sort(), ["/users/octocat", "/users/octocat/repos"]);
+});
+
+test("sums profile totals across 150 repositories on two pages", async () => {
+  const pages: number[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === "/users/octocat") {
+      return json({ login: "octocat", public_repos: 150, followers: 1, following: 1 });
+    }
+    assert.equal(url.pathname, "/users/octocat/repos");
+    assert.equal(url.searchParams.get("type"), "owner");
+    assert.equal(url.searchParams.get("per_page"), "100");
+    const page = Number(url.searchParams.get("page") ?? 1);
+    pages.push(page);
+    assert.ok(page <= 2);
+    return json(Array.from({ length: page === 1 ? 100 : 50 }, () => ({
+      stargazers_count: page, forks_count: 2,
+      language: page === 1 ? "TypeScript" : "Python",
+      pushed_at: page === 1 ? "2026-08-17T10:00:00Z" : "2026-08-18T10:00:00Z",
+    })));
+  };
+  const profile = await new GitHubClient({ fetchImpl, now: () => NOW }).fetchProfile("octocat");
+  assert.equal(profile.stars, 200);
+  assert.equal(profile.forks, 300);
+  assert.deepEqual(profile.primaryLanguages.map(({ name, repositories }) => ({ name, repositories })), [
+    { name: "TypeScript", repositories: 100 }, { name: "Python", repositories: 50 },
+  ]);
+  assert.equal(profile.latestPushAt, "2026-08-18T10:00:00Z");
+  assert.equal(profile.repositoriesTruncated, false);
+  assert.equal(profile.freshness.mode, "live");
+  assert.deepEqual(pages, [1, 2]);
+});
+
+test("marks profile totals partial at the five-page cap even when the user count matches", async () => {
+  const pages: number[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === "/users/octocat") {
+      return json({ login: "octocat", public_repos: 500, followers: 1, following: 1 });
+    }
+    assert.equal(url.pathname, "/users/octocat/repos");
+    const page = Number(url.searchParams.get("page") ?? 1);
+    pages.push(page);
+    assert.ok(page <= 5);
+    return json(Array.from({ length: 100 }, () => ({ stargazers_count: 1, forks_count: 2 })));
+  };
+  const profile = await new GitHubClient({ fetchImpl, now: () => NOW }).fetchProfile("octocat");
+  assert.equal(profile.stars, 500);
+  assert.equal(profile.forks, 1000);
+  assert.equal(profile.repositoriesTruncated, true);
+  assert.equal(profile.freshness.mode, "partial");
+  assert.deepEqual(pages, [1, 2, 3, 4, 5]);
+});
+
+test("checks later profile pages for invalid shapes and private data", async () => {
+  for (const [body, status, code] of [
+    [{}, 200, "invalid_response"],
+    [[null], 200, "invalid_response"],
+    [[{ stargazers_count: 1, forks_count: 1, private: true }], 200, "private_data"],
+    [[{ stargazers_count: -1, forks_count: 1 }], 200, "invalid_response"],
+  ] as const) {
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname === "/users/octocat") {
+        return json({ login: "octocat", public_repos: 101, followers: 1, following: 1 });
+      }
+      assert.equal(url.pathname, "/users/octocat/repos");
+      if (url.searchParams.get("page") === "2") return json(body, status);
+      return json(Array.from({ length: 100 }, () => ({ stargazers_count: 1, forks_count: 1 })));
+    };
+    await assert.rejects(
+      new GitHubClient({ fetchImpl, now: () => NOW }).fetchProfile("octocat"),
+      (error: unknown) => error instanceof GitHubApiError && error.code === code,
+    );
+  }
+});
+
+test("degrades to partial totals when GitHub cannot serve a later profile page", async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === "/users/octocat") {
+      return json({ login: "octocat", public_repos: 150, followers: 1, following: 1 });
+    }
+    if (url.searchParams.get("page") === "2") return json({}, 500);
+    return json(Array.from({ length: 100 }, () => ({ stargazers_count: 1, forks_count: 1 })));
+  };
+  const profile = await new GitHubClient({ fetchImpl, now: () => NOW }).fetchProfile("octocat");
+  assert.equal(profile.stars, 100);
+  assert.equal(profile.repositoriesTruncated, true);
+  assert.equal(profile.freshness.mode, "partial");
+});
+
+test("confirms an exact full profile page with an empty next page", async () => {
+  const pages: number[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === "/users/octocat") {
+      return json({ login: "octocat", public_repos: 100, followers: 1, following: 1 });
+    }
+    assert.equal(url.pathname, "/users/octocat/repos");
+    const page = Number(url.searchParams.get("page") ?? 1);
+    pages.push(page);
+    assert.ok(page <= 2);
+    return json(Array.from({ length: page === 1 ? 100 : 0 }, () => ({ stargazers_count: 1, forks_count: 1 })));
+  };
+  const profile = await new GitHubClient({ fetchImpl, now: () => NOW }).fetchProfile("octocat");
+  assert.equal(profile.stars, 100);
+  assert.equal(profile.repositoriesTruncated, false);
+  assert.deepEqual(pages, [1, 2]);
 });
 
 test("requires a server-side token for contribution calendars", async () => {
@@ -76,6 +334,417 @@ test("reads the credential-free public profile calendar and labelled activity pe
     { date: "2026-08-19", count: 7 },
   ]);
   assert.equal(contributions.freshness.source, "github-profile-html");
+});
+
+test("recovers one public calendar 503 without changing its year or sending credentials", async () => {
+  const calls: { url: string; authorization: string | null }[] = [];
+  let cancelled = false;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    calls.push({ url: input.toString(), authorization: new Headers(init?.headers).get("authorization") });
+    if (calls.length === 1) return new Response(new ReadableStream({
+      cancel() { cancelled = true; },
+    }), { status: 503, headers: { "retry-after": "0" } });
+    assert.equal(cancelled, true);
+    return html(publicContributionHtml(2026, { "2026-08-19": 7 }, {
+      Commits: 70, "Pull requests": 15, Issues: 10, "Code review": 5,
+    }));
+  };
+  const snapshot = await new GitHubClient({ token: "must-not-leave-process", fetchImpl, now: () => NOW })
+    .fetchPublicProfileContributions("octocat", 1);
+  assert.equal(snapshot.totalContributions, 7);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0]?.url, calls[1]?.url);
+  assert.ok(calls.every(({ authorization }) => authorization === null));
+});
+
+test("bounds public calendar 503 recovery to one retry", async () => {
+  let attempts = 0;
+  await assert.rejects(new GitHubClient({ now: () => NOW, fetchImpl: async () => {
+    attempts += 1;
+    return new Response("unavailable", { status: 503, headers: { "retry-after": "0" } });
+  } }).fetchPublicProfileContributions("octocat", 1),
+  (error: unknown) => error instanceof GitHubApiError && error.code === "github_unavailable");
+  assert.equal(attempts, 2);
+});
+
+test("identifies the public calendar upstream status without exposing its error body", async () => {
+  for (const status of [500, 502, 503, 504]) {
+    await assert.rejects(new GitHubClient({ now: () => NOW, fetchImpl: async () =>
+      new Response("fixture-sensitive-upstream-detail", { status, headers: { "retry-after": "0" } }),
+    }).fetchPublicProfileContributions("octocat", 1), (error: unknown) => {
+      assert.ok(error instanceof GitHubApiError);
+      assert.equal(error.code, "github_unavailable");
+      assert.equal(error.status, 502);
+      assert.match(error.message, new RegExp(`HTTP ${status}\\b`));
+      assert.doesNotMatch(error.message, /fixture-sensitive|octocat|https?:|deadline/);
+      return true;
+    });
+  }
+});
+
+test("honors public calendar Retry-After seconds and HTTP dates before retrying", async () => {
+  for (const retryAfterHeader of [() => "1", () => new Date(Math.ceil(Date.now() / 1_000) * 1_000 + 1_000).toUTCString()]) {
+    const retryAfter = retryAfterHeader();
+    let attempts = 0;
+    const startedAt = Date.now();
+    await new GitHubClient({ now: () => NOW, fetchImpl: async () => {
+      attempts += 1;
+      if (attempts === 1) return new Response("unavailable", { status: 503, headers: { "retry-after": retryAfter } });
+      assert.ok(Date.now() - startedAt >= 950, retryAfter);
+      return html(publicContributionHtml(2026, {}, { Commits: 100, "Pull requests": 0, Issues: 0, "Code review": 0 }));
+    } }).fetchPublicProfileContributions("octocat", 1);
+    assert.equal(attempts, 2);
+  }
+});
+
+test("does not retry a public calendar refusal or wait past the shared deadline", async () => {
+  for (const status of [401, 403, 404, 429, 503]) {
+    let attempts = 0;
+    const startedAt = Date.now();
+    await assert.rejects(new GitHubClient({ deadlineMs: 100, now: () => NOW, fetchImpl: async () => {
+      attempts += 1;
+      return new Response("refused", { status, headers: { "retry-after": "5" } });
+    } }).fetchPublicProfileContributions("octocat", 1), (error: unknown) => {
+      assert.ok(error instanceof GitHubApiError);
+      if (status === 503) {
+        // Retry-After 5 s cannot fit a 100 ms budget, so the 503 must surface as
+        // unavailable at once instead of sleeping into a github_timeout.
+        assert.equal(error.code, "github_unavailable");
+        assert.ok(Date.now() - startedAt < 1_000, `elapsed=${Date.now() - startedAt}`);
+      }
+      return true;
+    });
+    assert.equal(attempts, 1, `status=${status}`);
+  }
+});
+
+test("waits the default one second before retrying a public calendar 503 without Retry-After", async () => {
+  let attempts = 0;
+  let firstAttemptAt = 0;
+  let retriedAt = 0;
+  await new GitHubClient({ now: () => NOW, fetchImpl: async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      firstAttemptAt = Date.now();
+      return new Response("unavailable", { status: 503 });
+    }
+    retriedAt = Date.now();
+    return html(publicContributionHtml(2026, {}, { Commits: 100, "Pull requests": 0, Issues: 0, "Code review": 0 }));
+  } }).fetchPublicProfileContributions("octocat", 1);
+  assert.equal(attempts, 2);
+  assert.ok(retriedAt - firstAttemptAt >= 950, `gap=${retriedAt - firstAttemptAt}`);
+});
+
+test("reports a public calendar retry that outlives the shared deadline as a timeout", async () => {
+  let attempts = 0;
+  await assert.rejects(new GitHubClient({ deadlineMs: 1_300, now: () => NOW, fetchImpl: async (_input, init) => {
+    attempts += 1;
+    if (attempts === 1) return new Response("unavailable", { status: 503, headers: { "retry-after": "1" } });
+    // The 1 s retry fits the budget, but the second GET never answers: it must end
+    // when the request's abort signal fires, as a real fetch would.
+    return new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+  } }).fetchPublicProfileContributions("octocat", 1), (error: unknown) => {
+    assert.ok(error instanceof GitHubApiError);
+    assert.equal(error.code, "github_timeout");
+    return true;
+  });
+  assert.equal(attempts, 2);
+});
+
+test("clamps multi-year profile windows to two trailing years", async () => {
+  const calls: URL[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    calls.push(url);
+    const year = Number(url.searchParams.get("from")?.slice(0, 4));
+    const body = publicContributionHtml(year, {}, {
+      Commits: 0, "Pull requests": 0, Issues: 0, "Code review": 0,
+    }).replace(/ data-percentages="[^"]+"/, "");
+    return html(body);
+  };
+  const contributions = await new GitHubClient({ fetchImpl, now: () => NOW })
+    .fetchPublicProfileContributions("octocat", 999);
+  assert.deepEqual(calls.map((url) => url.searchParams.get("from")), ["2024-01-01", "2025-01-01", "2026-01-01"]);
+  assert.equal(contributions.days.length, 730);
+  assert.equal(contributions.days[0]?.date, "2024-08-20");
+  assert.equal(contributions.days.at(-1)?.date, "2026-08-19");
+});
+
+interface CalendarRange { from: string; to: string }
+
+function rangeCalendar(range: CalendarRange, count = 1) {
+  const dates = [];
+  for (const date = new Date(range.from); date <= new Date(range.to); date.setUTCDate(date.getUTCDate() + 1)) {
+    dates.push({ date: date.toISOString().slice(0, 10), contributionCount: count, contributionLevel: count ? "FIRST_QUARTILE" : "NONE" });
+  }
+  return dates;
+}
+
+function rangePayload(range: CalendarRange, overrides: Record<string, unknown> = {}) {
+  return { data: { user: { contributionsCollection: {
+    totalCommitContributions: 1,
+    totalIssueContributions: 2,
+    totalPullRequestContributions: 3,
+    totalPullRequestReviewContributions: 4,
+    hasAnyRestrictedContributions: false,
+    restrictedContributionsCount: 0,
+    contributionCalendar: { weeks: [{ contributionDays: rangeCalendar(range) }] },
+    ...overrides,
+  } } } };
+}
+
+for (const window of [365, 366, 730, 999, "auto"] as const) {
+  test(`token window ${window} uses bounded non-overlapping UTC collections`, async () => {
+    const asOf = new Date("2025-03-01T18:27:19.321Z");
+    const requested = window === "auto" ? 731 : Math.min(window, 730);
+    const calls: CalendarRange[] = [];
+    let preflights = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname === "/rate_limit") {
+        preflights += 1;
+        return json({}, 200, { "x-oauth-scopes": "public_repo" });
+      }
+      const { variables } = JSON.parse(String(init?.body)) as { variables: CalendarRange };
+      calls.push(variables);
+      assert.ok(Date.parse(variables.to) - Date.parse(variables.from) < 365 * 86400000, "GitHub collection must span fewer than 365 elapsed days");
+      return json(rangePayload(variables));
+    };
+    const snapshot = await new GitHubClient({ token: "server-secret", fetchImpl, now: () => asOf }).fetchContributions("octocat", window);
+    assert.equal(calls.length, Math.ceil(requested / 365));
+    assert.equal(preflights, 1, "reuse the same public credential proof");
+    assert.equal(calls[0]?.from, inclusiveWindowStart(asOf, requested) + "T00:00:00.000Z");
+    assert.equal(calls.at(-1)?.to, asOf.toISOString());
+    for (let index = 1; index < calls.length; index += 1) {
+      assert.equal(Date.parse(calls[index]!.from), Date.parse(calls[index - 1]!.to) + 1);
+      assert.ok(calls[index]!.from.endsWith("T00:00:00.000Z"));
+    }
+    assert.equal(snapshot.days.length, requested);
+    assert.equal(new Set(snapshot.days.map(day => day.date)).size, requested);
+    if (requested > 366) assert.ok(snapshot.days.some(day => day.date === "2024-02-29"));
+    assert.equal(snapshot.totalContributions, requested);
+    assert.deepEqual([snapshot.commits, snapshot.issues, snapshot.pullRequests, snapshot.reviews], [1, 2, 3, 4].map(value => value * calls.length));
+    assert.equal(snapshot.freshness.generatedAt, asOf.toISOString());
+  });
+}
+
+for (const problem of ["private", "missing", "duplicate", "future", "upstream"] as const) {
+  test(`multi-year token calendars reject a ${problem} later collection without partial output`, async () => {
+    let calls = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname === "/rate_limit") return json({}, 200, { "x-oauth-scopes": "public_repo" });
+      const { variables } = JSON.parse(String(init?.body)) as { variables: CalendarRange };
+      calls += 1;
+      const payload = rangePayload(variables);
+      if (calls === 2) {
+        if (problem === "upstream") return json({}, 503);
+        const collection = payload.data.user.contributionsCollection;
+        if (problem === "private") collection.hasAnyRestrictedContributions = true;
+        const days = collection.contributionCalendar.weeks[0]!.contributionDays;
+        if (problem === "missing") days.splice(15, 1);
+        if (problem === "duplicate") days.push({ ...days[0]! });
+        if (problem === "future") days.push({ date: "2026-08-20", contributionCount: 1, contributionLevel: "FIRST_QUARTILE" });
+      }
+      return json(payload);
+    };
+    await assert.rejects(new GitHubClient({ token: "server-secret", fetchImpl, now: () => NOW }).fetchContributions("octocat", 730),
+      (error: unknown) => error instanceof GitHubApiError && error.code === (problem === "private" ? "private_data" : problem === "upstream" ? "github_unavailable" : "invalid_response"));
+    assert.equal(calls, 2);
+  });
+}
+
+for (const key of ["totalCommitContributions", "totalIssueContributions", "totalPullRequestContributions", "totalPullRequestReviewContributions"]) {
+  test(`multi-year token calendars reject overflow in ${key}`, async () => {
+    let calls = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname === "/rate_limit") return json({}, 200, { "x-oauth-scopes": "public_repo" });
+      const { variables } = JSON.parse(String(init?.body)) as { variables: CalendarRange };
+      calls += 1;
+      return json(rangePayload(variables, { [key]: calls === 1 ? Number.MAX_SAFE_INTEGER : 1 }));
+    };
+    await assert.rejects(new GitHubClient({ token: "server-secret", fetchImpl, now: () => NOW }).fetchContributions("octocat", 730), isInvalidResponse);
+    assert.equal(calls, 2);
+  });
+}
+
+test("multi-year token requests retain the original absolute deadline", async (context) => {
+  let clock = 100000;
+  context.mock.method(Date, "now", () => clock);
+  let calls = 0;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === "/rate_limit") return json({}, 200, { "x-oauth-scopes": "public_repo" });
+    const { variables } = JSON.parse(String(init?.body)) as { variables: CalendarRange };
+    calls += 1;
+    clock += 13000;
+    return json(rangePayload(variables));
+  };
+  await assert.rejects(new GitHubClient({ token: "server-secret", fetchImpl, now: () => NOW }).fetchContributions("octocat", 730),
+    (error: unknown) => error instanceof GitHubApiError && error.code === "github_timeout");
+  assert.equal(calls, 1, "do not reset the budget for another collection");
+});
+
+test("automatic token windows span the two-year ceiling back to the earliest active day", async () => {
+  const graphQlBodies: string[] = [];
+  const from = new Date(Date.UTC(2024, 7, 19));
+  const days = [];
+  for (let index = 0; index < 731; index += 1) {
+    const date = new Date(from);
+    date.setUTCDate(date.getUTCDate() + index);
+    const count = index < 365 ? 0 : 1;
+    days.push({
+      date: date.toISOString().slice(0, 10),
+      contributionCount: count,
+      contributionLevel: count === 0 ? "NONE" : "FIRST_QUARTILE",
+    });
+  }
+  const weeks: { contributionDays: typeof days }[] = [];
+  for (let index = 0; index < days.length; index += 7) {
+    weeks.push({ contributionDays: days.slice(index, index + 7) });
+  }
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === "/rate_limit") return json({}, 200, { "x-oauth-scopes": "public_repo" });
+    graphQlBodies.push(String(init?.body));
+    const { variables } = JSON.parse(String(init?.body)) as { variables: CalendarRange };
+    const scoped = weeks.flatMap(week => week.contributionDays).filter(day => day.date >= variables.from.slice(0, 10) && day.date <= variables.to.slice(0, 10));
+    const active = scoped.filter(day => day.contributionCount > 0).length;
+    return json({
+      data: {
+        user: {
+          contributionsCollection: {
+            totalCommitContributions: active,
+            totalIssueContributions: 0,
+            totalPullRequestContributions: 0,
+            totalPullRequestReviewContributions: 0,
+            hasAnyRestrictedContributions: false,
+            restrictedContributionsCount: 0,
+            contributionCalendar: { weeks: [{ contributionDays: scoped }] },
+          },
+        },
+      },
+    });
+  };
+  const contributions = await new GitHubClient({ token: "server-secret", fetchImpl, now: () => NOW })
+    .fetchContributions("octocat", "auto");
+  assert.equal(JSON.parse(graphQlBodies[0]!).variables.from, "2024-08-19T00:00:00.000Z");
+  assert.equal(contributions.days.length, 366);
+  assert.equal(contributions.days[0]?.date, "2025-08-19");
+  assert.equal(contributions.days.at(-1)?.date, "2026-08-19");
+  assert.equal(contributions.totalContributions, 366);
+  assert.equal(contributions.commits, 366);
+});
+
+test("automatic windows accept short calendars that explicit windows reject", async () => {
+  const days: ReturnType<typeof rangeCalendar> = [];
+  for (let index = 0; index < 10; index += 1) {
+    const date = new Date(Date.UTC(2026, 7, 10 + index));
+    const count = index < 2 ? 0 : 1;
+    days.push({
+      date: date.toISOString().slice(0, 10),
+      contributionCount: count,
+      contributionLevel: count === 0 ? "NONE" : "FIRST_QUARTILE",
+    });
+  }
+  const payload = {
+    data: {
+      user: {
+        contributionsCollection: {
+          totalCommitContributions: 8,
+          totalIssueContributions: 0,
+          totalPullRequestContributions: 0,
+          totalPullRequestReviewContributions: 0,
+          hasAnyRestrictedContributions: false,
+          restrictedContributionsCount: 0,
+          contributionCalendar: { weeks: [{ contributionDays: days }] },
+        },
+      },
+    },
+  };
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === "/rate_limit") return json({}, 200, { "x-oauth-scopes": "public_repo" });
+    const { variables } = JSON.parse(String(init?.body)) as { variables: CalendarRange };
+    const scoped = days.filter(day => day.date >= variables.from.slice(0, 10) && day.date <= variables.to.slice(0, 10));
+    return json({ data: { user: { contributionsCollection: {
+      ...payload.data.user.contributionsCollection,
+      totalCommitContributions: scoped.reduce((sum, day) => sum + day.contributionCount, 0),
+      contributionCalendar: { weeks: [{ contributionDays: scoped }] },
+    } } } });
+  };
+  const client = new GitHubClient({ token: "server-secret", fetchImpl, now: () => NOW });
+  const contributions = await client.fetchContributions("octocat", "auto");
+  assert.equal(contributions.days.length, 8);
+  assert.equal(contributions.days[0]?.date, "2026-08-12");
+  await assert.rejects(client.fetchContributions("octocat", 30), isInvalidResponse);
+});
+
+for (const problem of ["gap", "stale", "empty"] as const) {
+  test(`automatic token calendars reject ${problem} history instead of reporting a complete window`, async () => {
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname === "/rate_limit") return json({}, 200, { "x-oauth-scopes": "public_repo" });
+      const { variables } = JSON.parse(String(init?.body)) as { variables: CalendarRange };
+      const payload = rangePayload(variables);
+      const collection = payload.data.user.contributionsCollection;
+      collection.contributionCalendar.weeks[0]!.contributionDays = rangeCalendar(variables).filter(day => {
+        if (problem === "empty") return false;
+        return day.date !== (problem === "gap" ? "2026-07-01" : "2026-08-19");
+      });
+      if (problem === "empty") {
+        collection.totalCommitContributions = 0;
+        collection.totalIssueContributions = 0;
+        collection.totalPullRequestContributions = 0;
+        collection.totalPullRequestReviewContributions = 0;
+      }
+      return json(payload);
+    };
+    await assert.rejects(new GitHubClient({ token: "server-secret", fetchImpl, now: () => NOW }).fetchContributions("octocat", "auto"), isInvalidResponse);
+  });
+}
+
+test("automatic token trimming cannot hide gaps in the inactive observed prefix", async () => {
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === "/rate_limit") return json({}, 200, { "x-oauth-scopes": "public_repo" });
+    const { variables } = JSON.parse(String(init?.body)) as { variables: CalendarRange };
+    const payload = rangePayload(variables);
+    payload.data.user.contributionsCollection.contributionCalendar.weeks[0]!.contributionDays = rangeCalendar(variables)
+      .filter(day => day.date !== "2025-01-01")
+      .map(day => ({ ...day, contributionCount: day.date < "2026-08-01" ? 0 : 1 }));
+    return json(payload);
+  };
+  await assert.rejects(new GitHubClient({ token: "server-secret", fetchImpl, now: () => NOW }).fetchContributions("octocat", "auto"), isInvalidResponse);
+});
+
+test("automatic public windows trim leading-zero years and keep the activity mix", async () => {
+  const active: Record<string, number> = {};
+  for (const date = new Date(Date.UTC(2026, 5, 1)); date <= NOW; date.setUTCDate(date.getUTCDate() + 1)) {
+    active[date.toISOString().slice(0, 10)] = 1;
+  }
+  const zeroMix = { Commits: 0, "Pull requests": 0, Issues: 0, "Code review": 0 };
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    const year = Number(url.searchParams.get("from")?.slice(0, 4));
+    if (year === 2026) {
+      return html(publicContributionHtml(2026, active, { Commits: 70, "Pull requests": 15, Issues: 10, "Code review": 5 }));
+    }
+    return html(publicContributionHtml(year, {}, zeroMix).replace(/ data-percentages="[^"]+"/, ""));
+  };
+  const contributions = await new GitHubClient({ fetchImpl, now: () => NOW })
+    .fetchPublicProfileContributions("octocat", "auto");
+  assert.equal(contributions.days.length, 80);
+  assert.equal(contributions.days[0]?.date, "2026-06-01");
+  assert.equal(contributions.days.at(-1)?.date, "2026-08-19");
+  assert.deepEqual(
+    { commits: contributions.commits, pullRequests: contributions.pullRequests, issues: contributions.issues, reviews: contributions.reviews },
+    { commits: 70, pullRequests: 15, issues: 10, reviews: 5 },
+  );
 });
 
 test("fails closed when GitHub public contribution markup is incomplete", async () => {
@@ -200,6 +869,72 @@ test("exposes only a scope-proven public contribution calendar", async () => {
   assert.equal("restrictedContributions" in contributions, false);
 });
 
+test("rejects an unknown contribution level instead of rendering it as no activity", async () => {
+  // A renamed quartile, an inherited Object.prototype key, null and a non-string are all unknown.
+  for (const level of ["FIFTH_QUARTILE", "toString", null, 3]) {
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname === "/rate_limit") return json({}, 200, { "x-oauth-scopes": "public_repo" });
+      return json({
+        data: {
+          user: {
+            contributionsCollection: {
+              totalCommitContributions: 2,
+              totalIssueContributions: 1,
+              totalPullRequestContributions: 1,
+              totalPullRequestReviewContributions: 1,
+              hasAnyRestrictedContributions: false,
+              restrictedContributionsCount: 0,
+              contributionCalendar: {
+                weeks: [{ contributionDays: [
+                  { date: "2026-08-18", contributionCount: 0, contributionLevel: "NONE" },
+                  { date: "2026-08-19", contributionCount: 5, contributionLevel: level },
+                ] }],
+              },
+            },
+          },
+        },
+      });
+    };
+    await assert.rejects(
+      new GitHubClient({ token: "server-secret", fetchImpl, now: () => NOW }).fetchContributions("octocat", 1),
+      (error: unknown) => error instanceof GitHubApiError && error.code === "invalid_response",
+      `contributionLevel=${level}`,
+    );
+  }
+});
+
+test("keeps level 0 for a contribution day whose level field is absent", async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === "/rate_limit") return json({}, 200, { "x-oauth-scopes": "public_repo" });
+    return json({
+      data: {
+        user: {
+          contributionsCollection: {
+            totalCommitContributions: 2,
+            totalIssueContributions: 1,
+            totalPullRequestContributions: 1,
+            totalPullRequestReviewContributions: 1,
+            hasAnyRestrictedContributions: false,
+            restrictedContributionsCount: 0,
+            contributionCalendar: {
+              weeks: [{ contributionDays: [
+                { date: "2026-08-18", contributionCount: 0, contributionLevel: "NONE" },
+                { date: "2026-08-19", contributionCount: 5 },
+              ] }],
+            },
+          },
+        },
+      },
+    });
+  };
+  const contributions = await new GitHubClient({ token: "server-secret", fetchImpl, now: () => NOW }).fetchContributions("octocat", 1);
+  assert.deepEqual(contributions.days.map(({ date, count, level }) => ({ date, count, level })), [
+    { date: "2026-08-19", count: 5, level: 0 },
+  ]);
+});
+
 test("rejects a contribution window that ends before the requested UTC date", async () => {
   const fetchImpl: typeof fetch = async (input) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
@@ -268,9 +1003,9 @@ test("accepts complete zero contribution days across a leap day", async () => {
         hasAnyRestrictedContributions: false,
         restrictedContributionsCount: 0,
         contributionCalendar: { weeks: [{ contributionDays: [
-          { date: "2024-02-28", contributionCount: 0 },
-          { date: "2024-02-29", contributionCount: 0 },
-          { date: "2024-03-01", contributionCount: 0 },
+          { date: "2024-02-28", contributionCount: 0, contributionLevel: "NONE" },
+          { date: "2024-02-29", contributionCount: 0, contributionLevel: "NONE" },
+          { date: "2024-03-01", contributionCount: 0, contributionLevel: "NONE" },
         ] }] },
       } } },
     });
@@ -435,6 +1170,7 @@ test("maps exact workflow evidence and missing releases honestly", async () => {
         license: { spdx_id: "NOASSERTION" },
       });
     }
+    if (url.pathname.endsWith("/branches/main")) return json({ name: "main", commit: { sha: HEAD_SHA } });
     if (url.pathname.endsWith("/releases/latest")) return json({}, 404);
     if (url.pathname.endsWith("/actions/workflows/ci.yml/runs")) {
       return json({
@@ -443,7 +1179,7 @@ test("maps exact workflow evidence and missing releases honestly", async () => {
           conclusion: "success",
           updated_at: "2026-08-18T23:00:00Z",
           html_url: "https://github.com/acme/atlas/actions/runs/1",
-          head_sha: "abc123",
+          head_sha: HEAD_SHA,
         }],
       });
     }
@@ -477,9 +1213,10 @@ test("marks old successful CI as stale", async () => {
         open_issues_count: 0,
       });
     }
+    if (url.pathname.endsWith("/branches/main")) return json({ name: "main", commit: { sha: HEAD_SHA } });
     if (url.pathname.endsWith("/releases/latest")) return json({}, 404);
     return json({
-      workflow_runs: [{ status: "completed", conclusion: "success", updated_at: "2025-01-01T00:00:00Z" }],
+      workflow_runs: [{ head_sha: HEAD_SHA, status: "completed", conclusion: "success", updated_at: "2025-01-01T00:00:00Z" }],
     });
   };
   const board = await new GitHubClient({ fetchImpl, now: () => NOW }).fetchProjects("acme", ["old"], LIFECYCLES, WORKFLOWS);
@@ -511,9 +1248,10 @@ test("queries only the configured workflow rather than the repository-wide runs 
     const url = new URL(input instanceof Request ? input.url : input.toString());
     calls.push(url.pathname);
     if (url.pathname === "/repos/acme/atlas") return json(projectRepository("atlas"));
+    if (url.pathname.endsWith("/branches/main")) return json({ name: "main", commit: { sha: HEAD_SHA } });
     if (url.pathname.endsWith("/releases/latest")) return json({}, 404);
     if (url.pathname.endsWith("/actions/workflows/ci.yml/runs")) {
-      return json({ workflow_runs: [{ status: "completed", conclusion: "success", updated_at: "2026-08-18T23:00:00Z" }] });
+      return json({ workflow_runs: [{ head_sha: HEAD_SHA, status: "completed", conclusion: "success", updated_at: "2026-08-18T23:00:00Z" }] });
     }
     assert.fail(`unexpected workflow lookup: ${url.pathname}`);
   };
@@ -533,6 +1271,7 @@ test("reports a declared but unavailable workflow as unavailable", async () => {
   const fetchImpl: typeof fetch = async (input) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
     if (url.pathname === "/repos/acme/atlas") return json(projectRepository("atlas"));
+    if (url.pathname.endsWith("/branches/main")) return json({ name: "main", commit: { sha: HEAD_SHA } });
     if (url.pathname.endsWith("/releases/latest")) return json({}, 404);
     if (url.pathname.endsWith("/actions/workflows/ci.yml/runs")) return json({}, 404);
     assert.fail(`unexpected lookup: ${url.pathname}`);
@@ -553,6 +1292,32 @@ test("rejects malformed required metrics rather than treating them as zero", asy
     return url.pathname.endsWith("/repos")
       ? json([])
       : json({ login: "octocat", public_repos: "not-a-number", followers: 1, following: 2 });
+  };
+  await assert.rejects(
+    new GitHubClient({ fetchImpl, now: () => NOW }).fetchProfile("octocat"),
+    (error: unknown) => error instanceof GitHubApiError && error.code === "invalid_response",
+  );
+});
+
+test("rejects a fractional repository metric rather than storing it as exact data", async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === "/repos/acme/atlas") return json({ ...projectRepository("atlas"), stargazers_count: 2.5 });
+    if (url.pathname.endsWith("/releases/latest")) return json({}, 404);
+    assert.fail(`unexpected lookup: ${url.pathname}`);
+  };
+  await assert.rejects(
+    new GitHubClient({ fetchImpl, now: () => NOW }).fetchProjects("acme", ["atlas"], new Map([["atlas", "active"]])),
+    (error: unknown) => error instanceof GitHubApiError && error.code === "invalid_response",
+  );
+});
+
+test("rejects an unsafe-integer profile metric rather than storing it as exact data", async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    return url.pathname.endsWith("/repos")
+      ? json([])
+      : json({ login: "octocat", public_repos: 0, followers: 1e30, following: 0 });
   };
   await assert.rejects(
     new GitHubClient({ fetchImpl, now: () => NOW }).fetchProfile("octocat"),
@@ -644,7 +1409,7 @@ test("classifies 403 as rate-limited only when GitHub supplies supporting eviden
       new GitHubClient({ fetchImpl: async () => response(), now: () => NOW }).fetchProfile("octocat"),
       (error: unknown) => {
         assert.ok(error instanceof GitHubApiError, label);
-        assert.equal(error.code, "github_unavailable", label);
+        assert.equal(error.code, "github_forbidden", label);
         assert.equal(error.status, 502, label);
         assert.equal(error.retryAfter, null, label);
         return true;
@@ -761,8 +1526,73 @@ test("applies one deadline across all GitHub calls", async () => {
   const fetchImpl: typeof fetch = async () => new Promise<Response>(() => undefined);
   await assert.rejects(
     new GitHubClient({ fetchImpl, deadlineMs: 5 }).fetchProfile("octocat"),
-    (error: unknown) => error instanceof GitHubApiError && error.code === "github_unavailable",
+    (error: unknown) => error instanceof GitHubApiError && error.code === "github_timeout",
   );
+});
+
+test("immediate fetch and body failures do not claim the request deadline expired", async () => {
+  for (const fetchImpl of [
+    async () => { throw new TypeError("fixture-sensitive-network-detail"); },
+    async () => new Response(new ReadableStream({ start(controller) {
+      controller.error(new Error("fixture-sensitive-stream-detail"));
+    } })),
+    async () => { throw new DOMException("fixture-sensitive-abort-detail", "AbortError"); },
+  ] satisfies (typeof fetch)[]) {
+    await assert.rejects(new GitHubClient({ fetchImpl }).fetchProfile("octocat"), (error: unknown) => {
+      assert.ok(error instanceof GitHubApiError);
+      assert.equal(error.code, "github_unavailable");
+      assert.doesNotMatch(error.message, /deadline|fixture-sensitive/);
+      return true;
+    });
+  }
+});
+
+test("a stalled response body is a deadline failure", async () => {
+  await assert.rejects(new GitHubClient({ deadlineMs: 15,
+    fetchImpl: async () => new Response(new ReadableStream({ start() {} })),
+  }).fetchProfile("octocat"), (error: unknown) => {
+    assert.ok(error instanceof GitHubApiError);
+    assert.equal(error.code, "github_timeout");
+    assert.match(error.message, /deadline/);
+    return true;
+  });
+});
+
+test("credential preflight distinguishes upstream refusal from unsafe token scopes", async () => {
+  for (const [status, code] of [[401, "github_auth_required"], [403, "github_forbidden"],
+    [429, "github_rate_limited"], [503, "github_unavailable"]] as const) {
+    await assert.rejects(new GitHubClient({ token: "ghp_fixture",
+      fetchImpl: async () => json({ message: "fixture-sensitive-upstream-detail" }, status),
+    }).fetchProfile("octocat"), (error: unknown) => {
+      assert.ok(error instanceof GitHubApiError);
+      assert.equal(error.code, code);
+      assert.doesNotMatch(error.message, /fixture-sensitive|deadline/);
+      return true;
+    });
+  }
+});
+
+test("GraphQL payload refusals carry safe auth, permission, and rate-limit codes", async () => {
+  for (const [errorEntry, code, status] of [
+    [{ type: "RATE_LIMITED" }, "github_rate_limited", 429],
+    [{ message: "You have exceeded a secondary rate limit. fixture-sensitive" }, "github_rate_limited", 429],
+    [{ type: "UNAUTHORIZED" }, "github_auth_required", 502],
+    [{ extensions: { code: "UNAUTHENTICATED" } }, "github_auth_required", 502],
+    [{ message: "This endpoint requires you to be authenticated. fixture-sensitive" }, "github_auth_required", 502],
+    [{ type: "FORBIDDEN" }, "github_forbidden", 502],
+    [{ type: "SERVICE_UNAVAILABLE", message: "fixture-sensitive" }, "github_unavailable", 502],
+  ] as const) {
+    await assert.rejects(new GitHubClient({ token: "ghp_public-only", now: () => NOW,
+      fetchImpl: graphqlFetch({ errors: [errorEntry] }),
+    }).fetchContributions("octocat", 7), (error: unknown) => {
+      assert.ok(error instanceof GitHubApiError);
+      assert.equal(error.code, code);
+      assert.equal(error.status, status);
+      assert.equal(error.retryAfter, code === "github_rate_limited" ? "60" : null);
+      assert.doesNotMatch(error.message, /fixture-sensitive|deadline/);
+      return true;
+    });
+  }
 });
 
 test("bounds concurrent project lookups below the Worker connection limit", async () => {
@@ -865,7 +1695,6 @@ test("recognizes the partial GraphQL not-found answer before the generic error p
   );
 
   for (const [label, payload] of [
-    ["non-not-found error", { data: { user: null }, errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }] }],
     ["mixed errors", { data: { user: null }, errors: [{ type: "NOT_FOUND" }, { type: "SERVICE_UNAVAILABLE" }] }],
     ["error with a resolved user", { data: { user: { contributionsCollection: null } }, errors: [{ type: "SERVICE_UNAVAILABLE" }] }],
   ] as const) {
@@ -884,7 +1713,8 @@ test("keeps rate-limit and upstream-outage semantics distinct from not found", a
     [404, "github_not_found", 404, null],
     [500, "github_unavailable", 502, "30"],
     [502, "github_unavailable", 502, "30"],
-    [403, "github_unavailable", 502, null],
+    [401, "github_auth_required", 502, "30"],
+    [403, "github_forbidden", 502, null],
     [429, "github_rate_limited", 429, "30"],
   ] as const) {
     const fetchImpl: typeof fetch = async () => new Response(null, { status, headers: { "x-ratelimit-reset": reset } });
@@ -907,6 +1737,7 @@ test("treats only 404 as an absent optional release or workflow run", async () =
   const optionalFetch = (optional: () => Response): typeof fetch => async (input) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
     if (url.pathname === "/repos/acme/atlas") return json(projectRepository("atlas"));
+    if (url.pathname.endsWith("/branches/main")) return json({ name: "main", commit: { sha: HEAD_SHA } });
     if (optionalPath(url.pathname)) return optional();
     assert.fail(`unexpected lookup: ${url.pathname}`);
   };
@@ -950,6 +1781,204 @@ test("treats only 404 as an absent optional release or workflow run", async () =
   assert.equal(restricted.freshness.mode, "partial");
 });
 
+test("maps a published release through fetchProjects with the first downloadable asset", async () => {
+  const board = await new GitHubClient({
+    fetchImpl: projectTextFetch({}, {
+      tag_name: "v2.0.0",
+      name: "Atlas 2.0",
+      html_url: "https://github.com/acme/atlas/releases/tag/v2.0.0",
+      published_at: "2026-08-18T12:00:00Z",
+      assets: [
+        { name: "atlas-linux.zip", browser_download_url: "https://github.com/acme/atlas/releases/download/v2.0.0/atlas-linux.zip" },
+        { name: "checksums.txt", browser_download_url: "https://github.com/acme/atlas/releases/download/v2.0.0/checksums.txt" },
+      ],
+    }),
+    now: () => NOW,
+  }).fetchProjects("acme", ["atlas"], new Map([["atlas", "active"]]));
+
+  assert.equal(board.projects[0].releaseState, "published");
+  assert.deepEqual(board.projects[0].release, {
+    tag: "v2.0.0",
+    name: "Atlas 2.0",
+    url: "https://github.com/acme/atlas/releases/tag/v2.0.0",
+    publishedAt: "2026-08-18T12:00:00Z",
+    download: {
+      name: "atlas-linux.zip",
+      url: "https://github.com/acme/atlas/releases/download/v2.0.0/atlas-linux.zip",
+    },
+  });
+});
+
+test("falls back to the tag and default asset name and skips non-downloadable assets", async () => {
+  const board = await new GitHubClient({
+    fetchImpl: projectTextFetch({}, {
+      tag_name: "v2.1.0",
+      html_url: "https://github.com/acme/atlas/releases/tag/v2.1.0",
+      published_at: "2026-08-18T12:00:00Z",
+      assets: [
+        { name: "not-a-download", browser_download_url: "javascript:alert(1)" },
+        { browser_download_url: "https://github.com/acme/atlas/releases/download/v2.1.0/atlas.tar.gz" },
+      ],
+    }),
+    now: () => NOW,
+  }).fetchProjects("acme", ["atlas"], new Map([["atlas", "active"]]));
+
+  assert.equal(board.projects[0].releaseState, "published");
+  assert.deepEqual(board.projects[0].release, {
+    tag: "v2.1.0",
+    name: "v2.1.0",
+    url: "https://github.com/acme/atlas/releases/tag/v2.1.0",
+    publishedAt: "2026-08-18T12:00:00Z",
+    download: {
+      name: "Release asset",
+      url: "https://github.com/acme/atlas/releases/download/v2.1.0/atlas.tar.gz",
+    },
+  });
+
+  const withoutAssets = await new GitHubClient({
+    fetchImpl: projectTextFetch({}, {
+      tag_name: "v2.1.0",
+      html_url: "https://github.com/acme/atlas/releases/tag/v2.1.0",
+      published_at: "2026-08-18T12:00:00Z",
+      assets: [],
+    }),
+    now: () => NOW,
+  }).fetchProjects("acme", ["atlas"], new Map([["atlas", "active"]]));
+
+  assert.equal(withoutAssets.projects[0].releaseState, "published");
+  assert.equal(withoutAssets.projects[0].release?.tag, "v2.1.0");
+  assert.equal(withoutAssets.projects[0].release?.download, null);
+});
+
+test("reports a release missing its tag, url or timestamp as unavailable", async () => {
+  const complete: Record<string, unknown> = {
+    tag_name: "v2.0.0",
+    name: "Atlas 2.0",
+    html_url: "https://github.com/acme/atlas/releases/tag/v2.0.0",
+    published_at: "2026-08-18T12:00:00Z",
+    assets: [],
+  };
+  for (const key of ["tag_name", "html_url", "published_at"]) {
+    const release: Record<string, unknown> = { ...complete };
+    delete release[key];
+    const board = await new GitHubClient({
+      fetchImpl: projectTextFetch({}, release),
+      now: () => NOW,
+    }).fetchProjects("acme", ["atlas"], new Map([["atlas", "active"]]));
+    assert.equal(board.projects[0].releaseState, "unavailable", `missing ${key}`);
+    assert.equal(board.projects[0].release, null, `missing ${key}`);
+  }
+});
+
+test("maps workflow conclusions to CI states through fetchProjects", async () => {
+  const observedAt = "2026-08-18T23:00:00Z";
+  const cases: Array<{ label: string; run: Record<string, unknown>; state: string; ciLabel: string }> = [
+    { label: "failure", run: { status: "completed", conclusion: "failure", updated_at: observedAt }, state: "failing", ciLabel: "Failing" },
+    { label: "cancelled", run: { status: "completed", conclusion: "cancelled", updated_at: observedAt }, state: "failing", ciLabel: "Failing" },
+    { label: "timed_out", run: { status: "completed", conclusion: "timed_out", updated_at: observedAt }, state: "failing", ciLabel: "Failing" },
+    { label: "success", run: { status: "completed", conclusion: "success", updated_at: observedAt }, state: "passing", ciLabel: "Passing" },
+    { label: "queued", run: { status: "queued", updated_at: observedAt }, state: "pending", ciLabel: "Pending" },
+    { label: "in_progress", run: { status: "in_progress", updated_at: observedAt }, state: "pending", ciLabel: "Pending" },
+    // Current behaviour pins action_required as unavailable: core maps only
+    // failure/cancelled/timed_out to failing, so any other known conclusion
+    // without a passing/pending mapping stays unavailable.
+    { label: "action_required", run: { status: "completed", conclusion: "action_required", updated_at: observedAt }, state: "unavailable", ciLabel: "CI unavailable" },
+  ];
+  for (const { label, run, state, ciLabel } of cases) {
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname === "/repos/acme/atlas") return json(projectRepository("atlas"));
+      if (url.pathname.endsWith("/branches/main")) return json({ name: "main", commit: { sha: HEAD_SHA } });
+      if (url.pathname.endsWith("/releases/latest")) return json({}, 404);
+      if (url.pathname.endsWith("/actions/workflows/ci.yml/runs")) return json({ workflow_runs: [{ head_sha: HEAD_SHA, ...run }] });
+      assert.fail(`unexpected lookup: ${url.pathname}`);
+    };
+    const board = await new GitHubClient({ fetchImpl, now: () => NOW }).fetchProjects(
+      "acme",
+      ["atlas"],
+      new Map([["atlas", "active"]]),
+      new Map([["atlas", "ci.yml"]]),
+    );
+    assert.equal(board.projects[0].ci.state, state, label);
+    assert.equal(board.projects[0].ci.label, ciLabel, label);
+    assert.equal(board.projects[0].ci.workflow, "ci.yml", label);
+    assert.equal(board.projects[0].ci.checkedAt, observedAt, label);
+  }
+});
+
+test("reports an unknown workflow conclusion as unavailable rather than passing or failing", async () => {
+  for (const run of [
+    { status: "completed", conclusion: "mystery", updated_at: "2026-08-18T23:00:00Z" },
+    { status: "weird-status", updated_at: "2026-08-18T23:00:00Z" },
+  ]) {
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname === "/repos/acme/atlas") return json(projectRepository("atlas"));
+      if (url.pathname.endsWith("/branches/main")) return json({ name: "main", commit: { sha: HEAD_SHA } });
+      if (url.pathname.endsWith("/releases/latest")) return json({}, 404);
+      if (url.pathname.endsWith("/actions/workflows/ci.yml/runs")) return json({ workflow_runs: [{ head_sha: HEAD_SHA, ...run }] });
+      assert.fail(`unexpected lookup: ${url.pathname}`);
+    };
+    const board = await new GitHubClient({ fetchImpl, now: () => NOW }).fetchProjects(
+      "acme",
+      ["atlas"],
+      new Map([["atlas", "active"]]),
+      new Map([["atlas", "ci.yml"]]),
+    );
+    const label = JSON.stringify(run);
+    assert.equal(board.projects[0].ci.state, "unavailable", label);
+    assert.equal(board.projects[0].ci.label, "CI unavailable", label);
+    assert.notEqual(board.projects[0].ci.state, "passing", label);
+    assert.notEqual(board.projects[0].ci.state, "failing", label);
+  }
+});
+
+test("rejects a profile whose repository list contains a private repository", async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === "/users/octocat") {
+      return json({ login: "octocat", public_repos: 2, followers: 1, following: 1 });
+    }
+    if (url.pathname === "/users/octocat/repos") {
+      return json([
+        { stargazers_count: 1, forks_count: 0, private: false },
+        { stargazers_count: 2, forks_count: 1, private: true },
+      ]);
+    }
+    assert.fail(`unexpected lookup: ${url.pathname}`);
+  };
+  await assert.rejects(
+    new GitHubClient({ fetchImpl, now: () => NOW }).fetchProfile("octocat"),
+    (error: unknown) => {
+      assert.ok(error instanceof GitHubApiError);
+      assert.equal(error.code, "private_data");
+      assert.equal(error.status, 403);
+      assert.equal(error.message, "GitHub returned a private repository in a public profile response");
+      return true;
+    },
+  );
+});
+
+test("accepts a profile whose repositories omit the private flag or mark it false", async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === "/users/octocat") {
+      return json({ login: "octocat", public_repos: 2, followers: 1, following: 1 });
+    }
+    if (url.pathname === "/users/octocat/repos") {
+      return json([
+        { stargazers_count: 3, forks_count: 1, private: false },
+        { stargazers_count: 4, forks_count: 2 },
+      ]);
+    }
+    assert.fail(`unexpected lookup: ${url.pathname}`);
+  };
+  const profile = await new GitHubClient({ fetchImpl, now: () => NOW }).fetchProfile("octocat");
+  assert.equal(profile.login, "octocat");
+  assert.equal(profile.stars, 7);
+  assert.equal(profile.forks, 3);
+});
+
 test("reports missing or non-array workflow_runs as unavailable rather than unconfigured", async () => {
   for (const body of [
     {},
@@ -958,10 +1987,12 @@ test("reports missing or non-array workflow_runs as unavailable rather than unco
     { workflow_runs: { 0: { status: "completed", conclusion: "success", updated_at: "2026-08-18T23:00:00Z" } } },
     { workflow_runs: [] },
     { workflow_runs: ["not-a-run"] },
+    { workflow_runs: ["corrupt", { status: "completed", conclusion: "success", updated_at: "2026-08-18T23:00:00Z", html_url: "https://github.com/acme/atlas/actions/runs/1", head_sha: "0123456789abcdef0123456789abcdef01234567" }] },
   ]) {
     const fetchImpl: typeof fetch = async (input) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
       if (url.pathname === "/repos/acme/atlas") return json(projectRepository("atlas"));
+      if (url.pathname.endsWith("/branches/main")) return json({ name: "main", commit: { sha: HEAD_SHA } });
       if (url.pathname.endsWith("/releases/latest")) return json({}, 404);
       if (url.pathname.endsWith("/actions/workflows/ci.yml/runs")) return json(body);
       assert.fail(`unexpected lookup: ${url.pathname}`);
@@ -994,7 +2025,7 @@ test("returns exactly the requested inclusive UTC contribution window", async ()
       const contributionDays = Array.from({ length: requestedDays + 4 }, (_, offset) => {
         const date = new Date(start);
         date.setUTCDate(date.getUTCDate() + offset);
-        return { date: date.toISOString().slice(0, 10), contributionCount: 1 };
+        return { date: date.toISOString().slice(0, 10), contributionCount: 1, contributionLevel: "FIRST_QUARTILE" };
       });
       return json({ data: { user: { contributionsCollection: {
         totalCommitContributions: 1,

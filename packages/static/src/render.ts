@@ -1,4 +1,4 @@
-import { calculateContributionMetrics, parseContributionCalendar } from "@commit-atlas/core";
+import { calculateContributionMetrics, parseContributionCalendar, selectContributionDisplayCalendar } from "@commit-atlas/core";
 import type {
   ContributionSnapshot,
   Freshness,
@@ -8,6 +8,7 @@ import type {
   ProjectSnapshot,
 } from "@commit-atlas/github";
 import {
+  renderSceneDefinition, MOTION_BACKEND_DEFAULTS,
   renderActivityCard,
   renderAtlasCard,
   renderCadenceCard,
@@ -19,17 +20,41 @@ import {
   renderRhythmCard,
   renderStreakCard,
   type AtlasCardData,
+  type CardDataState,
   type CardSource,
   type ProjectSignal,
+  type SceneLensProjection,
 } from "@commit-atlas/svg";
+import { beaconSnapshot } from "./beacon-input.js";
 import type { StaticCardName, StaticConfig } from "./config.js";
+import { sceneArtifactName, sceneStillArtifactName, staticSceneOptions, type SceneArtifactName, type SceneStillArtifactName } from "./scene-config.js";
 
-export type StaticArtifactName = `${StaticCardName}.svg` | "atlas-compact.svg" | "atlas-wide.svg";
+export type StaticStillArtifactName = "atlas-still.svg" | "atlas-compact-still.svg" | "atlas-wide-still.svg" | "activity-still.svg" | SceneStillArtifactName;
+export type StaticArtifactName = `${StaticCardName}.svg` | "atlas-compact.svg" | "atlas-wide.svg" | StaticStillArtifactName | SceneArtifactName;
 export type StaticSvgArtifacts = Readonly<Partial<Record<StaticArtifactName, string>>>;
 
 function toCardSource(freshness: Freshness): CardSource {
   if (freshness.mode === "demo" || freshness.source === "synthetic-demo") return "synthetic-demo";
   return freshness.source === "github-profile-html" ? "public-profile" : "public-github";
+}
+
+function toCardDataState(freshness: Freshness): CardDataState | undefined {
+  return freshness.mode === "partial" || freshness.mode === "stale" || freshness.mode === "unavailable"
+    ? freshness.mode
+    : undefined;
+}
+
+function toCardEvidence(
+  freshness: Freshness,
+): { readonly source: CardSource; readonly dataState?: CardDataState } {
+  const dataState = toCardDataState(freshness);
+  return { source: toCardSource(freshness), ...(dataState ? { dataState } : {}) };
+}
+
+function worseCardState(contribution: string | undefined, board: string | undefined): CardDataState | undefined {
+  const rank = (mode: string | undefined) => mode === "unavailable" ? 3 : mode === "stale" ? 2 : mode === "partial" ? 1 : 0;
+  const winner = rank(board) > rank(contribution) ? board : contribution;
+  return winner === "partial" || winner === "stale" || winner === "unavailable" ? winner : undefined;
 }
 
 export function assembleStaticPortfolio(
@@ -58,7 +83,7 @@ export function assembleStaticPortfolio(
   return {
     version: 1,
     profile,
-    contributions,
+    contributions: { ...contributions, days: calendar.days },
     metrics,
     projects,
     freshness: {
@@ -69,22 +94,31 @@ export function assembleStaticPortfolio(
   };
 }
 
-export function renderStaticArtifacts(snapshot: PortfolioSnapshot, config: StaticConfig): StaticSvgArtifacts {
+export function renderStaticArtifacts(snapshot: PortfolioSnapshot, config: StaticConfig, lens?: SceneLensProjection): StaticSvgArtifacts {
+  const scenes = staticSceneOptions(config);
   const selected = new Set(config.cards);
   const width = config.layout === "compact" ? 480 : 720;
   const dashboardWidth = config.layout === "compact" ? 480 : 860;
   const common = { theme: config.theme, motion: config.motion } as const;
   const { profile, contributions, metrics, projects } = snapshot;
-  const lastActive = [...contributions.days].reverse().find((day) => day.count > 0)?.date;
+  const sortedCalendarDays = [...contributions.days].sort((left, right) => left.date.localeCompare(right.date));
+  const lastActive = [...sortedCalendarDays].reverse().find((day) => day.count > 0)?.date;
   const artifacts: Partial<Record<StaticArtifactName, string>> = {};
 
   if (selected.has("atlas")) {
     const atlas = toAtlasCard(snapshot);
     artifacts["atlas.svg"] = renderAtlasCard(atlas, { ...common, width: dashboardWidth });
+    if (config.reducedMotion === true) {
+      artifacts["atlas-still.svg"] = renderAtlasCard(atlas, { ...common, motion: "none", width: dashboardWidth });
+    }
     if (config.responsiveAtlas) {
       const companion = config.layout === "compact" ? "atlas-wide.svg" : "atlas-compact.svg";
       const companionWidth = config.layout === "compact" ? 860 : 480;
       artifacts[companion] = renderAtlasCard(atlas, { ...common, width: companionWidth });
+      if (config.reducedMotion === true) {
+        const stillCompanion = config.layout === "compact" ? "atlas-wide-still.svg" : "atlas-compact-still.svg";
+        artifacts[stillCompanion] = renderAtlasCard(atlas, { ...common, motion: "none", width: companionWidth });
+      }
     }
   }
   if (selected.has("profile")) {
@@ -95,7 +129,7 @@ export function renderStaticArtifacts(snapshot: PortfolioSnapshot, config: Stati
       followers: profile.followers,
       following: profile.following,
       contributions: metrics.total,
-      source: toCardSource(profile.freshness),
+      ...toCardEvidence(profile.freshness),
       ...(profile.repositoriesTruncated ? {} : { stars: profile.stars }),
     }, { ...common, width });
   }
@@ -109,21 +143,26 @@ export function renderStaticArtifacts(snapshot: PortfolioSnapshot, config: Stati
       boundary: metrics.streak.boundary,
       total: metrics.total,
       activeDays: metrics.activeDays,
-      source: toCardSource(contributions.freshness),
+      ...toCardEvidence(contributions.freshness),
       ...(lastActive ? { lastActive } : {}),
     }, { ...common, width });
   }
   if (selected.has("activity")) {
-    artifacts["activity.svg"] = renderActivityCard({
-      days: contributions.days,
-      total: metrics.total,
-      periodLabel: `${metrics.window.from} → ${metrics.window.to}`,
-      source: toCardSource(contributions.freshness),
-    }, { ...common, width });
+    const display = selectContributionDisplayCalendar({ version: 1, days: contributions.days });
+    const activity = {
+      days: display.days,
+      total: display.days.reduce((total, day) => total + day.count, 0),
+      periodLabel: `${display.days[0]!.date} → ${display.days.at(-1)!.date}`,
+      ...toCardEvidence(contributions.freshness),
+    };
+    artifacts["activity.svg"] = renderActivityCard(activity, { ...common, width });
+    if (config.reducedMotion === true) {
+      artifacts["activity-still.svg"] = renderActivityCard(activity, { ...common, motion: "none", width });
+    }
   }
   if (selected.has("breakdown")) {
     artifacts["breakdown.svg"] = renderContributionBreakdownCard({
-      source: toCardSource(contributions.freshness),
+      ...toCardEvidence(contributions.freshness),
       window: { from: metrics.window.from, to: metrics.window.to, days: metrics.window.days },
       breakdown: metrics.breakdown,
       basis: metrics.breakdownBasis,
@@ -131,7 +170,7 @@ export function renderStaticArtifacts(snapshot: PortfolioSnapshot, config: Stati
   }
   if (selected.has("rhythm")) {
     artifacts["rhythm.svg"] = renderRhythmCard({
-      source: toCardSource(contributions.freshness),
+      ...toCardEvidence(contributions.freshness),
       window: { from: metrics.window.from, to: metrics.window.to, days: metrics.window.days },
       activeDays: metrics.activeDays,
       density: metrics.density,
@@ -148,22 +187,22 @@ export function renderStaticArtifacts(snapshot: PortfolioSnapshot, config: Stati
       rhythm: metrics.rhythm,
     }, { ...common, width });
   }
-  if (selected.has("languages")) {
-    if (profile.repositoriesTruncated) throw new Error("Language distribution is unavailable for a truncated repository list");
+  if (selected.has("languages") && !profile.repositoriesTruncated) {
+    // Skip when truncated: an unknown language mix must not look like a real result.
     artifacts["languages.svg"] = renderLanguagesCard({
-      source: toCardSource(profile.freshness),
+      ...toCardEvidence(profile.freshness),
       languages: profile.primaryLanguages.map((language) => ({ name: language.name, percentage: language.share })),
     }, { ...common, width });
   }
   if (selected.has("projects")) {
     artifacts["projects.svg"] = renderProjectBoard({
-      source: toCardSource(projects?.freshness ?? snapshot.freshness),
+      ...toCardEvidence(projects?.freshness ?? snapshot.freshness),
       projects: (projects?.projects ?? []).map(toProjectSignal),
     }, { ...common, width: dashboardWidth });
   }
   if (selected.has("cadence")) {
     artifacts["cadence.svg"] = renderCadenceCard({
-      source: toCardSource(contributions.freshness),
+      ...toCardEvidence(contributions.freshness),
       days: contributions.days,
     }, { ...common, width });
   }
@@ -172,7 +211,7 @@ export function renderStaticArtifacts(snapshot: PortfolioSnapshot, config: Stati
     const projectsWithReleaseEvidence = projectStates
       .filter((project) => project.releaseState !== "unavailable");
     artifacts["releases.svg"] = renderReleasesCard({
-      source: toCardSource(projects?.freshness ?? snapshot.freshness),
+      ...toCardEvidence(projects?.freshness ?? snapshot.freshness),
       releases: projectsWithReleaseEvidence.flatMap((project) => project.release
         ? [{ project: project.name, tag: project.release.tag, publishedAt: project.release.publishedAt }]
         : []),
@@ -180,12 +219,33 @@ export function renderStaticArtifacts(snapshot: PortfolioSnapshot, config: Stati
       projectsUnavailable: projectStates.length - projectsWithReleaseEvidence.length,
     }, { ...common, width });
   }
+  for (const definition of scenes.definitions) {
+    const inputs = {
+      snapshot: definition.id === "identity-beacon" && scenes.identity ? beaconSnapshot(snapshot, config.projects, scenes.identity.focus) : snapshot,
+      ...(lens ? { lens } : {}), ...(scenes.identity ? { identity: scenes.identity } : {}),
+    };
+    const context = {
+      theme: config.theme, pack: scenes.pack, motion: config.motion, backend: MOTION_BACKEND_DEFAULTS["github-readme"],
+      layout: config.layout, instanceNamespace: "static", seed: "",
+    } as const;
+    artifacts[sceneArtifactName(definition.id)] = renderSceneDefinition(definition, inputs, context).svg;
+    if (config.reducedMotion === true) {
+      artifacts[sceneStillArtifactName(definition.id)] = renderSceneDefinition(definition, inputs, { ...context, motion: "none" }).svg;
+    }
+  }
   return artifacts;
 }
 
 function toAtlasCard(snapshot: PortfolioSnapshot): AtlasCardData {
   const { profile, contributions, metrics, projects } = snapshot;
   const projectStates = projects?.projects ?? [];
+  const evidence = toCardEvidence(snapshot.freshness);
+  const dataState = worseCardState(
+    worseCardState(snapshot.freshness.mode, projects?.freshness.mode),
+    profile.repositoriesTruncated ? "partial" : undefined,
+  );
+  const passing = projectStates.filter((project) => project.ci.state === "passing").length;
+  const attention = projectStates.filter((project) => ["failing", "pending", "stale"].includes(project.ci.state)).length;
   return {
     profile: {
       name: profile.name?.trim() || profile.login,
@@ -215,18 +275,21 @@ function toAtlasCard(snapshot: PortfolioSnapshot): AtlasCardData {
       direction: metrics.trend.direction,
     },
     rhythm: metrics.rhythm,
-    activity: contributions.days,
+    activity: selectContributionDisplayCalendar({ version: 1, days: contributions.days }).days,
     ...(profile.repositoriesTruncated ? {} : {
       languages: profile.primaryLanguages.map((language) => ({ name: language.name, percentage: language.share })),
     }),
     projects: {
       total: projectStates.length,
-      passing: projectStates.filter((project) => project.ci.state === "passing").length,
-      attention: projectStates.filter((project) => ["failing", "pending", "stale"].includes(project.ci.state)).length,
-      unavailable: projectStates.filter((project) => ["unavailable", "unconfigured"].includes(project.ci.state)).length,
+      passing,
+      attention,
+      // The complement, as `toAtlasCard` in lib/portfolio.ts computes it: anything that is not
+      // passing or needing attention, including a state this build does not recognize, is unavailable.
+      unavailable: projectStates.length - passing - attention,
     },
     generatedAt: snapshot.freshness.generatedAt,
-    source: snapshot.freshness.source === "github-profile-html" ? "public-profile" : "public-github",
+    source: evidence.source,
+    ...(dataState ? { dataState } : {}),
   };
 }
 

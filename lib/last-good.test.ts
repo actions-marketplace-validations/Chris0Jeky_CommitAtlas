@@ -8,17 +8,47 @@ import {
 
 const LIVE_AT = new Date("2026-08-27T20:00:00.000Z");
 
+test("two hosted scene ids never share a last-good key", async () => {
+  const coverage = new Request("https://example.test/api/v1/scenes/evidence-coverage.svg?user=octocat&demo=false&motion=none");
+  const terrain = new Request("https://example.test/api/v1/scenes/activity-terrain.svg?user=octocat&demo=false&motion=none");
+  assert.notEqual(await publicLastGoodKey(coverage), await publicLastGoodKey(terrain));
+});
+
+test("a public scene snapshot can be served stale with the same strip as a card", async () => {
+  const store = memoryStore();
+  const pending: Promise<unknown>[] = [];
+  const request = new Request("https://example.test/api/v1/scenes/evidence-coverage.svg?user=octocat&demo=false&motion=none");
+  const liveBody = svgBody("2026-08-27T19:58:00.000Z");
+  await withPublicLastGood(request, async () => svgResponse(liveBody), runtime(store, pending, LIVE_AT));
+  await Promise.all(pending);
+  assert.equal(store.values.size, 1);
+
+  const stale = await withPublicLastGood(
+    request,
+    async () => githubError(502, "github_unavailable"),
+    runtime(store, [], new Date("2026-08-27T21:00:00.000Z")),
+  );
+  assert.equal(stale.status, 200);
+  assert.equal(stale.headers.get("x-commitatlas-data-state"), "stale");
+  const body = await stale.text();
+  assert.match(body, /STALE SNAPSHOT/);
+  assert.match(body, /<desc>[^<]*STALE SNAPSHOT/);
+});
+
 test("canonical keys ignore query order while isolating user, theme, and route", async () => {
   const first = new Request("https://example.test/api/v1/cards/profile.svg?theme=paper&user=octocat&demo=false&motion=none");
   const reordered = new Request("https://another-host.test/api/v1/cards/profile.svg?motion=none&demo=false&user=octocat&theme=paper");
   const otherUser = new Request("https://example.test/api/v1/cards/profile.svg?theme=paper&user=hubot&demo=false&motion=none");
   const otherTheme = new Request("https://example.test/api/v1/cards/profile.svg?theme=ember&user=octocat&demo=false&motion=none");
   const otherRoute = new Request("https://example.test/api/v1/cards/streak.svg?theme=paper&user=octocat&demo=false&motion=none");
+  const subtleMotion = new Request("https://example.test/api/v1/cards/profile.svg?theme=paper&user=octocat&demo=false&motion=subtle");
+  const ambientMotion = new Request("https://example.test/api/v1/cards/profile.svg?theme=paper&user=octocat&demo=false&motion=ambient");
 
   assert.equal(await publicLastGoodKey(first), await publicLastGoodKey(reordered));
   assert.notEqual(await publicLastGoodKey(first), await publicLastGoodKey(otherUser));
   assert.notEqual(await publicLastGoodKey(first), await publicLastGoodKey(otherTheme));
   assert.notEqual(await publicLastGoodKey(first), await publicLastGoodKey(otherRoute));
+  assert.notEqual(await publicLastGoodKey(subtleMotion), await publicLastGoodKey(ambientMotion));
   assert.match(await publicLastGoodKey(first), /^public-last-good:v1:[a-f\d]{64}$/);
 });
 
@@ -60,6 +90,40 @@ test("a validated public SVG primes one expiring entry and later serves an expli
   assert.match(staleBody, /<rect x="0" y="220" width="720" height="16"/);
 });
 
+test("public text does not supply the observation time", async () => {
+  const store = memoryStore();
+  const pending: Promise<unknown>[] = [];
+  const request = new Request("https://example.test/api/v1/cards/atlas.svg?user=octocat&demo=false&theme=paper&days=365&motion=none&layout=wide");
+  const forged = "2020-01-01T00:00:00.000Z";
+  const stamped = "2026-08-27T19:58:00.000Z";
+  const liveBody = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 220" role="img"><title>Atlas</title><desc>Public profile</desc><text>Generated ${forged}</text><text>Generated ${stamped} · longest streak is window-bounded</text></svg>`;
+  await withPublicLastGood(request, async () => svgResponse(liveBody), runtime(store, pending, LIVE_AT));
+  await Promise.all(pending);
+  const key = await publicLastGoodKey(request);
+  const entry = JSON.parse(store.values.get(key)!) as { observedAt: string };
+  assert.equal(entry.observedAt, stamped);
+
+  const biographyStore = memoryStore();
+  const biographyPending: Promise<unknown>[] = [];
+  const biographyRequest = new Request("https://example.test/api/v1/cards/profile.svg?user=octocat&demo=false&theme=paper&motion=none");
+  const biography = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 220" role="img"><title>Profile</title><desc>Public profile</desc><text>Generated ${forged}</text></svg>`;
+  await withPublicLastGood(biographyRequest, async () => svgResponse(biography), runtime(biographyStore, biographyPending, LIVE_AT));
+  await Promise.all(biographyPending);
+  const biographyKey = await publicLastGoodKey(biographyRequest);
+  const biographyEntry = JSON.parse(biographyStore.values.get(biographyKey)!) as { observedAt: string };
+  assert.equal(biographyEntry.observedAt, LIVE_AT.toISOString());
+
+  const jsonStore = memoryStore();
+  const jsonPending: Promise<unknown>[] = [];
+  const jsonRequest = new Request("https://example.test/api/v1/profile?demo=false&user=octocat");
+  const jsonBody = JSON.stringify({ version: 1, biography: `Generated ${forged}` });
+  await withPublicLastGood(jsonRequest, async () => jsonSuccess(jsonBody), runtime(jsonStore, jsonPending, LIVE_AT));
+  await Promise.all(jsonPending);
+  const jsonKey = await publicLastGoodKey(jsonRequest);
+  const jsonEntry = JSON.parse(jsonStore.values.get(jsonKey)!) as { observedAt: string };
+  assert.equal(jsonEntry.observedAt, LIVE_AT.toISOString());
+});
+
 test("a matching public 304 refreshes only retention while preserving the stored observation", async () => {
   const store = memoryStore();
   const url = "https://example.test/api/v1/profile?demo=false&user=octocat";
@@ -85,9 +149,127 @@ test("a matching public 304 refreshes only retention while preserving the stored
   await Promise.all(pending);
   assert.equal(store.putOptions.length, 2);
   assert.deepEqual(store.putOptions[1], { expirationTtl: 604800 });
-  const after = JSON.parse(store.values.get(key)!) as { storedAt: string; observedAt: string; body: string };
-  assert.deepEqual(after, before);
-  assert.equal(store.reads, 1);
+  const after = JSON.parse(store.values.get(key)!) as { storedAt: string; observedAt: string; body: string; validatedAt: string };
+  assert.deepEqual(after, { ...before, validatedAt: "2026-09-02T20:00:00.000Z" });
+  assert.equal(store.reads, 2);
+
+  const stale = await withPublicLastGood(request, async () => githubError(502, "github_unavailable"),
+    runtime(store, [], new Date("2026-09-04T20:00:00.000Z")));
+  assert.equal(stale.status, 200, "day 8 remains eligible after the matching day 6 validation");
+  assert.equal(stale.headers.get("x-commitatlas-observed-at"), before.observedAt);
+  assert.equal(stale.headers.get("x-commitatlas-last-good-at"), before.storedAt);
+  assert.equal(stale.headers.get("x-commitatlas-last-good-age"), "691200");
+
+  const expired = await withPublicLastGood(request, async () => githubError(502, "github_unavailable"),
+    runtime(store, [], new Date("2026-09-09T20:00:01.000Z")));
+  assert.equal(expired.status, 502, "retention still expires seven days after validation");
+});
+
+test("a matching SVG 304 keeps day-8 fallback eligible for each recoverable GitHub failure", async () => {
+  const store = memoryStore();
+  const request = new Request("https://example.test/api/v1/cards/atlas.svg?user=octocat&demo=false");
+  const pending: Promise<unknown>[] = [];
+  const original = svgBody("2026-08-27T19:58:00.000Z");
+  await withPublicLastGood(request, async () => svgResponse(original), runtime(store, pending, LIVE_AT));
+  await Promise.all(pending);
+  const etag = svgResponse(original).headers.get("etag")!;
+  await withPublicLastGood(new Request(request, { headers: { "if-none-match": etag } }),
+    async () => notModified(etag), runtime(store, pending, new Date("2026-09-02T20:00:00Z")));
+  await Promise.all(pending);
+
+  for (const [status, code] of [
+    [429, "github_rate_limited"], [502, "github_unavailable"], [502, "github_timeout"],
+    [502, "github_auth_required"], [502, "github_forbidden"],
+  ] as const) {
+    const stale = await withPublicLastGood(request, async () => githubError(status, code),
+      runtime(store, [], new Date("2026-09-04T20:00:00Z")));
+    assert.equal(stale.status, 200, code);
+    assert.equal(stale.headers.get("x-commitatlas-data-state"), "stale", code);
+    assert.match(await stale.text(), /STALE SNAPSHOT.*OBSERVED 2026-08-27T19:58:00\.000Z/, code);
+  }
+});
+
+test("invalid or future validation timestamps cannot extend fallback eligibility", async () => {
+  const store = memoryStore();
+  const request = new Request("https://example.test/api/v1/profile?demo=false&user=octocat");
+  const pending: Promise<unknown>[] = [];
+  await withPublicLastGood(request, async () => jsonSuccess(), runtime(store, pending, LIVE_AT));
+  await Promise.all(pending);
+  const key = await publicLastGoodKey(request);
+  const entry = JSON.parse(store.values.get(key)!) as Record<string, unknown>;
+  for (const validatedAt of [null, 123, "invalid", "2026-08-27T19:00:00Z", "2026-09-10T20:00:00Z"]) {
+    store.values.set(key, JSON.stringify({ ...entry, validatedAt }));
+    const response = await withPublicLastGood(request, async () => githubError(502, "github_unavailable"),
+      runtime(store, [], new Date("2026-09-04T20:00:00Z")));
+    assert.equal(response.status, 502, String(validatedAt));
+  }
+});
+
+test("a public 304 does not replace a newer body written during the first retention read", async () => {
+  const backing = memoryStore();
+  const url = "https://example.test/api/v1/profile?demo=false&user=octocat";
+  const request = new Request(url);
+  const priming: Promise<unknown>[] = [];
+  await withPublicLastGood(request, async () => jsonSuccess(), runtime(backing, priming, LIVE_AT));
+  await Promise.all(priming);
+
+  const key = await publicLastGoodKey(request);
+  const oldEtag = 'W/"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"';
+  const newer = JSON.stringify({
+    version: 1,
+    body: JSON.stringify({ version: 1, freshness: { generatedAt: "2026-09-02T19:30:00.000Z" } }),
+    storedAt: "2026-09-02T19:40:00.000Z",
+    observedAt: "2026-09-02T19:30:00.000Z",
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      etag: 'W/"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"',
+    },
+  });
+
+  let reads = 0;
+  let releaseFirstRead: () => void = () => {};
+  const firstReadGate = new Promise<void>((resolve) => {
+    releaseFirstRead = resolve;
+  });
+  let markSnapshotted: () => void = () => {};
+  const snapshotted = new Promise<void>((resolve) => {
+    markSnapshotted = resolve;
+  });
+  const store: LastGoodStore = {
+    async get(candidate) {
+      reads += 1;
+      if (reads === 1) {
+        const snapshot = backing.values.get(candidate) ?? null;
+        markSnapshotted();
+        await firstReadGate;
+        return snapshot;
+      }
+      return backing.values.get(candidate) ?? null;
+    },
+    async put(candidate, value, options) {
+      backing.values.set(candidate, value);
+      backing.putOptions.push(options);
+    },
+  };
+
+  const pending: Promise<unknown>[] = [];
+  const responsePromise = withPublicLastGood(
+    new Request(url, { headers: { "if-none-match": oldEtag } }),
+    async () => notModified(oldEtag),
+    runtime(store, pending, new Date("2026-09-02T20:00:00.000Z")),
+  );
+  await snapshotted;
+  backing.values.set(key, newer);
+  releaseFirstRead();
+
+  const response = await responsePromise;
+  assert.equal(response.status, 304);
+  assert.equal(response.headers.get("x-route-proof"), "unchanged");
+  assert.equal(pending.length, 1);
+  await Promise.all(pending);
+  assert.equal(backing.values.get(key), newer);
+  assert.equal(reads, 2);
+  assert.equal(backing.putOptions.length, 1);
 });
 
 test("missing, mismatched, corrupt, and cross-key entries cannot be refreshed by a 304", async () => {
@@ -288,6 +470,38 @@ test("cold, expired, corrupt, and non-upstream failures retain the original erro
   assert.equal((await readFailure.json() as { error: { code: string } }).error.code, "github_unavailable");
 });
 
+test("unusable stored HTTP headers retain the original bounded upstream error", async () => {
+  const request = new Request("https://example.test/api/v1/profile?user=octocat&demo=false");
+  const store = memoryStore();
+  const pending: Promise<unknown>[] = [];
+  await withPublicLastGood(request, async () => jsonSuccess(), runtime(store, pending, LIVE_AT));
+  await Promise.all(pending);
+  const key = await publicLastGoodKey(request);
+  const original = JSON.parse(store.values.get(key)!) as { headers: Record<string, string> };
+
+  for (const value of ["no-referrer\u0000", "\u0100", "\ud83d\ude00"]) {
+    store.values.set(key, JSON.stringify({
+      ...original,
+      headers: { ...original.headers, "referrer-policy": value },
+    }));
+    for (const [status, code] of [[502, "github_unavailable"], [429, "github_rate_limited"]] as const) {
+      const upstream = githubError(status, code);
+      const response = await withPublicLastGood(request, async () => upstream, runtime(store, [], LIVE_AT));
+      assert.equal(response, upstream, "a corrupt cache entry must preserve the route response");
+      assert.equal(response.status, status);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal((await response.json() as { error: { code: string } }).error.code, code);
+    }
+  }
+
+  store.values.set(key, JSON.stringify(original));
+  const fallback = await withPublicLastGood(request, async () => githubError(502, "github_unavailable"),
+    runtime(store, [], LIVE_AT));
+  assert.equal(fallback.status, 200, "usable stored headers must still permit stale fallback");
+  assert.equal(fallback.headers.get("x-commitatlas-data-state"), "stale");
+  assert.equal((await fallback.json() as { freshness: { mode: string } }).freshness.mode, "stale");
+});
+
 test("synthetic, token-backed, method-mismatched, and cross-key requests never reuse public entries", async () => {
   const store = memoryStore();
   const pending: Promise<unknown>[] = [];
@@ -313,6 +527,32 @@ test("synthetic, token-backed, method-mismatched, and cross-key requests never r
     assert.equal(result.status, 502, candidate.url);
   }
   assert.equal(store.values.size, writes);
+});
+
+test("survey and orbital scene packs do not share a last-good key", async () => {
+  const survey = new Request("https://example.test/api/v1/scenes/evidence-coverage.svg?user=octocat&demo=false&pack=survey");
+  const orbital = new Request("https://example.test/api/v1/scenes/evidence-coverage.svg?user=octocat&demo=false&pack=orbital");
+  assert.notEqual(await publicLastGoodKey(survey), await publicLastGoodKey(orbital));
+});
+
+test("an invalid scene pack stays a client error instead of a last-good image", async () => {
+  const store = memoryStore();
+  const pending: Promise<unknown>[] = [];
+  const nope = new Request("https://example.test/api/v1/scenes/evidence-coverage.svg?user=octocat&demo=false&pack=nope");
+  await withPublicLastGood(nope, async () => svgResponse(svgBody()), runtime(store, pending, LIVE_AT));
+  await Promise.all(pending);
+  const rejected = await withPublicLastGood(
+    nope,
+    async () => new Response(JSON.stringify({ error: { code: "invalid_input" } }), {
+      status: 400,
+      headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
+    }),
+    runtime(store, [], LIVE_AT),
+  );
+  assert.equal(rejected.status, 400);
+  const body = await rejected.text();
+  assert.match(body, /invalid_input/);
+  assert.doesNotMatch(body, /<svg/u);
 });
 
 function runtime(
@@ -396,3 +636,41 @@ function notModified(etag: string) {
     },
   });
 }
+
+test("a changed last-good scene body cannot inherit a fresh compiler receipt", async () => {
+  const store = memoryStore();
+  const pending: Promise<unknown>[] = [];
+  const request = new Request("https://example.test/api/v1/scenes/evidence-coverage.svg?user=octocat&demo=false");
+  const body = svgBody();
+  const fresh = svgResponse(body);
+  fresh.headers.set("x-commitatlas-scene-metadata", JSON.stringify({ version: 1, scene: "evidence-coverage",
+    bytes: new TextEncoder().encode(body).length, animatedElements: 0, loopingGroups: 0, unavailable: false }));
+  const live = await withPublicLastGood(request, async () => fresh, runtime(store, pending, LIVE_AT));
+  assert.ok(live.headers.has("x-commitatlas-scene-metadata"));
+  await Promise.all(pending);
+  const stale = await withPublicLastGood(request, async () => githubError(502, "github_unavailable"),
+    runtime(store, [], new Date("2026-08-27T21:00:00Z")));
+  assert.equal(stale.status, 200);
+  assert.equal(stale.headers.get("x-commitatlas-data-state"), "stale");
+  assert.equal(stale.headers.has("x-commitatlas-scene-metadata"), false);
+  assert.notEqual(await stale.text(), body);
+});
+
+test("a changed last-good card body cannot inherit a fresh compiler receipt", async () => {
+  const store = memoryStore();
+  const pending: Promise<unknown>[] = [];
+  const request = new Request("https://example.test/api/v1/cards/profile.svg?user=octocat&demo=false");
+  const body = svgBody();
+  const fresh = svgResponse(body);
+  fresh.headers.set("x-commitatlas-card-metadata", JSON.stringify({ version: 1, card: "profile",
+    bytes: new TextEncoder().encode(body).length, animatedElements: 0, loopingGroups: 0, state: "ready" }));
+  const live = await withPublicLastGood(request, async () => fresh, runtime(store, pending, LIVE_AT));
+  assert.ok(live.headers.has("x-commitatlas-card-metadata"));
+  await Promise.all(pending);
+  const stale = await withPublicLastGood(request, async () => githubError(502, "github_unavailable"),
+    runtime(store, [], new Date("2026-08-27T21:00:00Z")));
+  assert.equal(stale.status, 200);
+  assert.equal(stale.headers.get("x-commitatlas-data-state"), "stale");
+  assert.equal(stale.headers.has("x-commitatlas-card-metadata"), false);
+  assert.notEqual(await stale.text(), body);
+});

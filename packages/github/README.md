@@ -9,9 +9,25 @@ const client = new GitHubClient();
 const contributions = await client.fetchPublicProfileContributions("octocat", 365);
 ```
 
+Every public `GitHubClient` fetch method validates identifiers before sending any request, including token
+scope checks. Invalid identifiers reject with `InputError` (`code: "invalid_input"`), which hosted
+routes return as HTTP 400. Handles and repository names are trimmed while preserving their casing;
+valid `.git` suffixes remain part of the repository name. A nonempty project list accepts up to six
+distinct repository names, compared case-insensitively. An empty list still returns an empty board
+for a valid owner. The exported `parseRepositoryNames` accepts either CSV or an array; array entries
+are individual names, so an embedded comma is invalid.
+
 The logged-out public-profile path sends no credential, requires a complete daily window, and labels
 GitHub's public activity mix as percentages. Token-backed request-time routes are a separate API and
 require positive public-only classic OAuth scope evidence before resource lookup.
+
+`GitHubApiError.code` distinguishes `github_timeout` (the shared deadline expired),
+`github_auth_required` (HTTP 401 or GraphQL authentication refusal), `github_forbidden`
+(permission refusal), `github_rate_limited` (primary/secondary quota), `github_unavailable`
+(network/read failure, 5xx or unclassified GraphQL failure), and `github_not_found`.
+Messages never expose upstream bodies. Hosted routes preserve the v1 error envelope and use
+502 for upstream failures, 429 with retry guidance for quotas, and 404 for not found; see
+[the API contract](../../docs/ARCHITECTURE.md#hosted-delivery-and-caching).
 
 The static generator and Action currently use logged-out public data only. Private generation is not
 implemented or implied.

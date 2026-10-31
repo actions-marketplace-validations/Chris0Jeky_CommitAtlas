@@ -1,7 +1,8 @@
 import { fetchPortfolioSnapshot } from "./portfolio";
 import type { PortfolioSnapshot, ProjectLifecycle } from "./github/types";
 import { buildStudioRouteUrl, type StudioCardKind, type StudioRouteOptions } from "@/app/studio/studio-urls";
-import { compactCount } from "./instruments";
+import { themes, type ThemeName } from "@/packages/svg/src/index";
+import { compactCount, rhythmGaugeReadout } from "./instruments";
 
 /**
  * The landing page's data contract.
@@ -50,7 +51,8 @@ export function landingCompactAtlasUrl(): string {
   return buildStudioRouteUrl("atlas", COMPACT_OPTIONS);
 }
 
-export function landingThemedAtlasUrl(theme: string): string {
+export function landingThemedAtlasUrl(theme: ThemeName): string {
+  if (!Object.hasOwn(themes, theme)) throw new Error("landing theme must be a shipped card theme");
   return buildStudioRouteUrl("atlas", { ...LANDING_OPTIONS, theme });
 }
 
@@ -114,17 +116,20 @@ export interface SpecimenCard {
  */
 export function specimenCards(snapshot: PortfolioSnapshot): readonly SpecimenCard[] {
   const { profile, metrics } = snapshot;
+  // The same availability decision the gauge and the evidence drawer make: a non-finite score is
+  // unavailable, never NaN/100.
+  const rhythm = rhythmGaugeReadout(metrics.rhythm.score);
   return [
     {
       kind: "atlas",
       number: "CARD 01",
       name: "ATLAS COMPACT",
       title: "Developer atlas, compact",
-      purpose: "The full atlas in a 480×570 portrait plate, for a README column that has no room to run wide.",
-      size: "480×570 FIXED",
+      purpose: "The full atlas in a 480×608 portrait plate, for a README column that has no room to run wide.",
+      size: "480×608 FIXED",
       note: "MOBILE README",
       width: 480,
-      height: 570,
+      height: 608,
       compact: true,
     },
     {
@@ -167,7 +172,7 @@ export function specimenCards(snapshot: PortfolioSnapshot): readonly SpecimenCar
       title: "Personal rhythm",
       purpose: "Transparent personal consistency based on density and streak — not a GitHub rank.",
       size: "RESPONSIVE",
-      note: `${metrics.rhythm.score}/100 · NOT A RANK`,
+      note: `${rhythm.showScale ? `${rhythm.text}/100` : rhythm.text} · NOT A RANK`,
       width: 720,
       height: 220,
     },
@@ -212,7 +217,7 @@ export function specimenCards(snapshot: PortfolioSnapshot): readonly SpecimenCar
 }
 
 /** The four SVG card themes, unchanged by the chassis. `paper` ships for light README embeds. */
-export const CARD_THEMES: readonly { id: string; label: string; ground: string; light?: true }[] = [
+export const CARD_THEMES: readonly { id: ThemeName; label: string; ground: string; light?: true }[] = [
   { id: "aurora", label: "AURORA · #09131F", ground: "#09131f" },
   { id: "midnight", label: "MIDNIGHT · #05070D", ground: "#05070d" },
   { id: "paper", label: "PAPER · #F8FAFC · ON LIMESTONE", ground: "#e8ecd6", light: true },

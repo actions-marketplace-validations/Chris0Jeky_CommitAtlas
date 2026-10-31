@@ -3,10 +3,12 @@ import {
   calculateContributionMetrics,
   calculateStreaks,
   parseContributionCalendar,
+  selectContributionDisplayCalendar,
   type ContributionCalendar,
 } from "@/packages/core/src/index";
 import type {
   ActivityCardData,
+  CardDataState,
   CardSource,
   ContributionBreakdownCardData,
   LanguagesCardData,
@@ -14,14 +16,17 @@ import type {
   ProjectBoardData,
   ProjectSignal,
   RhythmCardData,
+  SceneInputs,
   StreakCardData,
 } from "@/packages/svg/src/index";
+import { demoLensProjection } from "./lens-projection";
 import { toSvgCiState, toSvgLifecycle } from "./github/adapters";
 import { GitHubApiError } from "./github/client";
 import type {
   ContributionSnapshot,
   Freshness,
   ProfileSnapshot,
+  PortfolioSnapshot,
   ProjectBoardSnapshot,
   ProjectSnapshot,
 } from "./github/types";
@@ -29,6 +34,19 @@ import type {
 function toCardSource(freshness: Freshness): CardSource {
   if (freshness.mode === "demo" || freshness.source === "synthetic-demo") return "synthetic-demo";
   return freshness.source === "github-profile-html" ? "public-profile" : "public-github";
+}
+
+function toCardDataState(freshness: Freshness): CardDataState | undefined {
+  return freshness.mode === "partial" || freshness.mode === "stale" || freshness.mode === "unavailable"
+    ? freshness.mode
+    : undefined;
+}
+
+function toCardEvidence(
+  freshness: Freshness,
+): { readonly source: CardSource; readonly dataState?: CardDataState } {
+  const dataState = toCardDataState(freshness);
+  return { source: toCardSource(freshness), ...(dataState ? { dataState } : {}) };
 }
 
 function contributionCurrentDay(snapshot: ContributionSnapshot, asOf: string): "closed" | "open" {
@@ -43,7 +61,7 @@ export function toProfileCard(snapshot: ProfileSnapshot): ProfileCardData {
     repositories: snapshot.publicRepositories,
     followers: snapshot.followers,
     following: snapshot.following,
-    source: toCardSource(snapshot.freshness),
+    ...toCardEvidence(snapshot.freshness),
     ...(snapshot.repositoriesTruncated ? {} : { stars: snapshot.stars }),
   };
 }
@@ -80,7 +98,7 @@ export function toStreakCard(snapshot: ContributionSnapshot, expectedDays: numbe
     total,
     activeDays,
     lastActive,
-    source: toCardSource(snapshot.freshness),
+    ...toCardEvidence(snapshot.freshness),
   };
 }
 
@@ -88,12 +106,13 @@ export function toActivityCard(snapshot: ContributionSnapshot, days: number): Ac
   const calendar = contributionCalendar(snapshot);
   const asOf = latestContributionDate(calendar);
   const window = completeContributionWindow(calendar, asOf, days);
-  const series = calculateActivitySeries(window, { asOf, days });
+  const display = selectContributionDisplayCalendar(window);
+  const series = calculateActivitySeries(display, { asOf, days: display.days.length });
   return {
     days: series.points.map(({ date, count, level }) => ({ date, count, level })),
     total: series.total,
     periodLabel: `${series.from} → ${series.to}`,
-    source: toCardSource(snapshot.freshness),
+    ...toCardEvidence(snapshot.freshness),
   };
 }
 
@@ -129,16 +148,16 @@ export function toContributionMetricsCards(
   if (!metrics.window.complete || metrics.window.observedDays !== expectedDays) {
     throw new GitHubApiError("invalid_response", "GitHub returned an incomplete contribution window");
   }
-  const source = toCardSource(snapshot.freshness);
+  const evidence = toCardEvidence(snapshot.freshness);
   return {
     breakdown: {
-      source,
+      ...evidence,
       window: { from: metrics.window.from, to: metrics.window.to, days: metrics.window.days },
       breakdown: metrics.breakdown,
       basis: metrics.breakdownBasis,
     },
     rhythm: {
-      source,
+      ...evidence,
       window: { from: metrics.window.from, to: metrics.window.to, days: metrics.window.days },
       activeDays: metrics.activeDays,
       density: metrics.density,
@@ -166,7 +185,7 @@ export function toLanguagesCard(snapshot: ProfileSnapshot): LanguagesCardData {
     );
   }
   return {
-    source: toCardSource(snapshot.freshness),
+    ...toCardEvidence(snapshot.freshness),
     languages: snapshot.primaryLanguages.map((language) => ({
       name: language.name,
       percentage: language.share,
@@ -174,8 +193,14 @@ export function toLanguagesCard(snapshot: ProfileSnapshot): LanguagesCardData {
   };
 }
 
+/** Hosted projection input is the vendored C0 fixture, enabled only by an explicit demo flag. */
+export function toSceneInputs(snapshot: PortfolioSnapshot, options: { readonly demo?: boolean } = {}): SceneInputs {
+  const lens = options.demo === true ? demoLensProjection(snapshot) : undefined;
+  return { snapshot, ...(lens ? { lens } : {}) };
+}
+
 export function toProjectBoard(snapshot: ProjectBoardSnapshot): ProjectBoardData {
-  return { source: toCardSource(snapshot.freshness), projects: snapshot.projects.map(toProjectSignal) };
+  return { ...toCardEvidence(snapshot.freshness), projects: snapshot.projects.map(toProjectSignal) };
 }
 
 function toProjectSignal(project: ProjectSnapshot): ProjectSignal {
@@ -204,7 +229,7 @@ function completeContributionWindow(
   asOf: string,
   expectedDays: number,
 ): ContributionCalendar {
-  if (!Number.isInteger(expectedDays) || expectedDays < 1 || expectedDays > 366) {
+  if (!Number.isInteger(expectedDays) || expectedDays < 1 || expectedDays > 731) {
     throw new GitHubApiError("invalid_response", "CommitAtlas received an invalid contribution window");
   }
   const available = new Set(calendar.days.map((day) => day.date));

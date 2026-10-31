@@ -161,14 +161,23 @@ all animation and the result is a complete page, not a degraded one.
 | M7 | Acquisition failure | needle hunts, stutters, falls back to −90°; the lamp never lights and the plate reads NO SIGNAL from frame zero |
 | M8 | Evidence drawer | up 12px and settle, 260ms, `cubic-bezier(.2,.9,.3,1)`; ESC or click outside closes |
 | M9 | Survey parallax | the grid drifts at 0.85× scroll via a scroll-driven CSS timeline, off below 768px. Browsers without `scroll()` timelines get a static grid, which is the reduced-motion state anyway. (`globals.css` heads its motion block "M1…M9"; this is the ninth) |
+| M10 | Star twinkle | decorative opacity 1 → 0.35 → 1 over 7s, scene family only. The animated wrapper holds marks and never a text node. Nebula uses one group so a year of stars stays inside the 96-element scene budget |
 
-The card SVGs keep `motion=none|subtle` and stay transform-only. Nothing here changes them.
+The card renderer now shares the four-profile vocabulary `none | subtle | ambient | cinematic`.
+Hosted URLs and the Studio expose `none | subtle | ambient`; static/package callers may also select
+`cinematic`. Atlas and Activity now differentiate `ambient`: a scan follows the calendar gaps,
+a compass ornament turns, and the Atlas adds a seven-second beam on the header separator.
+Their stale, unavailable, empty and all-zero views remain still. Other cards retain the compatible
+transform-only entrance; `none` remains a complete still view everywhere.
 
-The [expansion programme](./EXPANSION_PLAN.md) plans to move that boundary — `ambient` and
-`cinematic` profiles, the M-series ported into the cards through a CSS/SMIL motion compiler — only
-after Phase 0 has measured how github.com actually renders animated SVG through `<img>`. Until a
-slice ships, the sentence above stays true, and any new motion ref a scene introduces is recorded
-in the table here as M10 onward.
+The `MotionPlan` compiler encodes M1/M3–M7 in CSS and SMIL and now supplies Atlas/Activity ambient
+output. M3 stagger is 400 ms/14 ms; M4/M5/M6 remain 4.5/2.4/7 s. Decorative-only scale,
+opacity, rotation, and path motion preserve underlying readings. README loops are bounded to
+45 seconds with fill none/remove; CSS supplies a reduced-motion override and SMIL requires a static
+twin. Per-target backend defaults remain provisional until #113 completes the matrix.
+The [density guide](./CONTRIBUTION_DENSITY.md) distinguishes direct-image browser evidence from
+the separate, still-incomplete github.com/Camo transport matrix.
+Any new motion ref a scene introduces is recorded in the table here as M10 onward.
 
 ## Where this departs from the handoff
 
@@ -197,24 +206,27 @@ probe.
 
 They are rendered inside an `<img>` on GitHub, which sets two hard constraints the web surface does
 not have. **No webfont can load**, so the cards use a system stack and have to survive substitution
-on whatever machine renders them — an embedded `@font-face` would spend the whole 30 KiB budget
+on whatever machine renders them — an embedded `@font-face` would spend the whole 30,000 UTF-8-byte budget
 before any data was drawn. And **the card carries its own opaque background**, so it is a plate on
 the reader's page rather than part of it.
 
 ### The density ramp
 
-One hue at four steps, plus a neutral socket for a day with nothing observed.
+The owner's 29 October brief replaces the single relative ramp on Atlas and Activity with absolute
+daily bands: copper squares for 1–200, gold squares with one cut corner for 201–700, violet squares
+with two cut corners for 701–1500, and one of six original vector glyphs above 1500. Each band has
+four ordered shades. Numeric keys and shape differences carry the tier boundary independently of
+hue; a neutral socket means observed zero, while an invalid count receives an unavailable mark.
 
-Never four hues. Hue carries no order — nothing about orange, green and yellow says *more* — and
-the ramp this replaced also borrowed `accent`, `positive` and `warning`, which are the three colours
-the contribution mix prints one panel to the right. A square's colour therefore named a category it
-did not mean. In greyscale that ramp inverted between levels 3 and 4, so it failed outright for
-anyone reading without colour.
+`packages/svg/src/density.ts` owns thresholds, palettes, shape paths and deterministic date-based
+glyph selection. The same date retains its glyph through theme and count updates while it remains
+above the threshold. The old theme-level `density` ramp remains available to other consumers;
+upstream relative intensity levels no longer determine these two cards' cell colours.
 
-`densityFill` is the only place a level becomes a colour, and a non-finite level resolves to the
-socket rather than indexing past the end of the ramp: an unreadable signal must never paint as the
-busiest day. `svg.test.mjs` asserts monotonic luminance, a ≥1.25× separation at every step, and that
-no step collides with the mix ink or a status colour.
+Regression checks cover every threshold, invalid counts, per-band luminance order and at least
+3:1 contrast against the card surface, date-stable glyphs and full-year byte budgets. The calendar
+and its summary use at most the latest 365 observed civil dates; history/streak metrics keep their
+full supplied window. Exact observed date/count values remain in the accessible SVG description.
 
 The direction follows the ground. On a dark card more activity is **brighter**; on a light card it
 is **darker**. The socket stays neutral either way, because a pale tint of the activity colour reads

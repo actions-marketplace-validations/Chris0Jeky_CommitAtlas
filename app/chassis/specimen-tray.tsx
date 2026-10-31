@@ -24,7 +24,7 @@ export function SpecimenTray({ snapshot }: { snapshot: PortfolioSnapshot }) {
 
   return (
     <section className="section shell" id="cards" aria-labelledby="cards-title">
-      <p className="numeral">02 // Specimen tray · 8 live SVG routes</p>
+      <p className="numeral">02 // Specimen tray · 8 card routes</p>
       <div className="section-head">
         <h2 id="cards-title">See the whole toolkit.</h2>
         <p className="section-aside">
@@ -57,11 +57,11 @@ export function SpecimenTray({ snapshot }: { snapshot: PortfolioSnapshot }) {
             <p className="spec-rows">
               ROUTE &nbsp;<b>/api/v1/cards/atlas.svg</b>
               <br />
-              SIZE &nbsp;&nbsp;<b>860×380 fixed · &lt;30 KiB</b>
+              SIZE &nbsp;&nbsp;<b>860×380 fixed · &lt;30,000 UTF-8 bytes</b>
               <br />
               LIMITS <b>No script · No foreignObject · No external refs</b>
               <br />
-              MOTION <b>none | subtle (transform-only)</b>
+              MOTION <b>hosted: none | subtle | ambient</b>
             </p>
           </div>
           <p className="flagship-caveat">
@@ -85,7 +85,7 @@ export function SpecimenTray({ snapshot }: { snapshot: PortfolioSnapshot }) {
                 <span>{card.number} {"//"} {card.name}</span>
                 <span>{card.size}</span>
               </h3>
-              <a className="specimen-media" href={url} aria-label={`Open the synthetic ${card.title} SVG`}>
+              <a className="specimen-media" href={url} aria-label={`Open SVG for the synthetic ${card.title} card`}>
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={url}
@@ -101,7 +101,7 @@ export function SpecimenTray({ snapshot }: { snapshot: PortfolioSnapshot }) {
                 {/* Eight of these otherwise resolve to the identical name "Open SVG". Same name and
                     same destination as the plate's image link, which is what keeps them distinct
                     from each other rather than from their sibling. */}
-                <a href={url} aria-label={`Open the synthetic ${card.title} SVG`}>Open SVG <span aria-hidden="true">↗</span></a>
+                <a href={url} aria-label={`Open SVG for the synthetic ${card.title} card`}>Open SVG <span aria-hidden="true">↗</span></a>
               </div>
             </article>
           );

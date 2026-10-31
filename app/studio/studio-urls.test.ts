@@ -1,12 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseLifecycleMap, parseRepositoryNames, parseWorkflowMap } from "@/lib/github/validation";
+import { parseSvgSceneQuery } from "@/lib/svg-routes";
+import { listScenes } from "@/packages/svg/src/index";
 import {
   buildStudioConfigurationKey,
   buildStudioRouteUrl,
+  buildStudioSceneUrl,
+  buildStudioSourceUrl,
   isCopyableStudioOrigin,
+  isValidStudioOwner,
+  studioSelectionFromQuery,
   isStudioPreviewCurrent,
   resolveStudioBaseUrl,
+  STUDIO_SCENE_IDS,
+  STUDIO_SCENE_PACKS,
+  STUDIO_SCENE_SUPPORTED_PACKS,
   type StudioCardKind,
 } from "./studio-urls";
 
@@ -56,6 +65,23 @@ test("uses separate JSON and SVG project route paths", () => {
   assert.equal(json.searchParams.has("motion"), false);
   assert.equal(svg.searchParams.get("theme"), "paper");
   assert.equal(svg.searchParams.get("motion"), "none");
+});
+
+test("omits a blank project instead of leaving a repository hole", () => {
+  const url = buildStudioRouteUrl("projects", {
+    owner: "octocat",
+    theme: "ember",
+    demo: true,
+    projects: [
+      { repo: "alpha", lifecycle: "active", workflow: "" },
+      { repo: " ", lifecycle: "planned", workflow: "ci.yml" },
+      { repo: "beta", lifecycle: "maintenance", workflow: "" },
+    ],
+  });
+  const parsed = new URL(`https://example.test${url}`);
+  assert.equal(parsed.searchParams.get("repos"), "alpha,beta");
+  assert.equal(parsed.searchParams.get("states"), "alpha:active,beta:maintenance");
+  assert.equal(parsed.searchParams.get("workflows"), null);
 });
 
 test("propagates only aligned, nonblank workflows with URL encoding", () => {
@@ -177,8 +203,21 @@ test("emits card URLs in the public route canonical order", () => {
   }), "/api/v1/cards/atlas.svg?user=octocat&demo=true&theme=ember&days=365&motion=none&layout=compact");
 });
 
+
+test("emits ambient motion in hosted URLs and treats it as route-affecting configuration", () => {
+  assert.equal(buildStudioRouteUrl("profile", {
+    owner: "octocat",
+    theme: "ember",
+    demo: true,
+    motion: "ambient",
+  }), "/api/v1/cards/profile.svg?user=octocat&demo=true&theme=ember&motion=ambient");
+
+  const subtle = buildStudioConfigurationKey({ owner: "octocat", theme: "ember", demo: true, motion: "subtle" });
+  const ambient = buildStudioConfigurationKey({ owner: "octocat", theme: "ember", demo: true, motion: "ambient" });
+  assert.notEqual(ambient, subtle);
+});
 test("binds a successful origin to the exact route-affecting configuration", () => {
-  const baseline = { owner: " Octocat ", theme: "ember", demo: true, projects };
+  const baseline = { owner: " octocat ", theme: "ember", demo: true, projects };
   const key = buildStudioConfigurationKey(baseline);
 
   assert.equal(key, buildStudioConfigurationKey({
@@ -186,6 +225,7 @@ test("binds a successful origin to the exact route-affecting configuration", () 
     owner: "octocat",
     projects: projects.map((project) => ({ ...project, repo: project.repo.trim() })),
   }));
+  assert.notEqual(key, buildStudioConfigurationKey({ ...baseline, owner: "Octocat" }));
   assert.notEqual(key, buildStudioConfigurationKey({ ...baseline, owner: "other" }));
   assert.notEqual(key, buildStudioConfigurationKey({ ...baseline, theme: "paper" }));
   assert.notEqual(key, buildStudioConfigurationKey({ ...baseline, demo: false }));
@@ -206,4 +246,92 @@ test("binds a successful origin to the exact route-affecting configuration", () 
   assert.equal(isStudioPreviewCurrent(key, null), false);
   assert.equal(resolveStudioBaseUrl(key, validated, "https://placeholder.example"), "https://atlas.example");
   assert.equal(resolveStudioBaseUrl("changed", validated, "https://placeholder.example"), "https://placeholder.example");
+});
+
+test("the Studio preview window matches every date-window README embed", async () => {
+  const urls = await import("./studio-urls");
+  const { buildStudioMarkdown } = await import("./studio-markdown");
+  assert.equal(urls.STUDIO_PREVIEW_DAYS, 365);
+  const markdown = buildStudioMarkdown({
+    renderedCardIds: new Set(["atlas", "profile", "streak", "breakdown", "rhythm", "activity", "languages", "projects"]),
+    baseUrl: "https://studio.example", owner: "octocat", theme: "ember", demo: true,
+    projects: [], selectedCards: new Set(["atlas", "activity", "breakdown", "rhythm"]),
+    hasCurrentContributions: true, hasCurrentLanguages: true,
+  });
+  const embeds = [...markdown.matchAll(/(?:src|srcset)="([^"]+)"/g)];
+  assert.equal(embeds.length, 12);
+  for (const [, url] of embeds) {
+    assert.equal(new URL(url!).searchParams.get("days"), String(urls.STUDIO_PREVIEW_DAYS));
+  }
+});
+
+test("lists exactly the hosted instrument and map scenes", () => {
+  const hosted = listScenes()
+    .filter((scene) => scene.family === "instrument" || scene.family === "map")
+    .map((scene) => scene.id);
+  assert.deepEqual([...STUDIO_SCENE_IDS], hosted);
+  for (const id of STUDIO_SCENE_IDS) {
+    const scene = listScenes().find((item) => item.id === id);
+    assert.ok(scene);
+    assert.deepEqual([...STUDIO_SCENE_SUPPORTED_PACKS[id]], [...scene.supportedPacks]);
+  }
+});
+
+test("scene preview URLs are the route canonical query", () => {
+  assert.deepEqual([...STUDIO_SCENE_PACKS], ["survey", "orbital", "spectral", "terminal"]);
+  const defaults = buildStudioSceneUrl("evidence-coverage", {
+    owner: "octocat",
+    theme: "aurora",
+    demo: true,
+    days: 365,
+    motion: "none",
+    layout: "wide",
+    pack: "survey",
+  });
+  assert.equal(defaults, "/api/v1/scenes/evidence-coverage.svg?user=octocat&demo=true");
+  const selected = buildStudioSceneUrl("evidence-coverage", {
+    owner: "octocat",
+    theme: "ember",
+    demo: true,
+    days: 365,
+    motion: "ambient",
+    layout: "compact",
+    pack: "orbital",
+    projects,
+  });
+  const parsed = new URL(`https://example.test${selected}`);
+  assert.equal(parsed.pathname, "/api/v1/scenes/evidence-coverage.svg");
+  assert.equal(parsed.searchParams.get("pack"), "orbital");
+  assert.equal(parsed.searchParams.get("motion"), "ambient");
+  assert.equal(parsed.searchParams.get("layout"), "compact");
+  assert.equal(parsed.searchParams.has("days"), false);
+  const query = parseSvgSceneQuery(parsed.searchParams);
+  assert.equal(query.canonical, parsed.search.slice(1));
+  assert.equal(query.pack, "orbital");
+  assert.throws(() => buildStudioSceneUrl("not-a-scene", {
+    owner: "octocat", theme: "ember", demo: true,
+  }), /unknown studio scene/);
+});
+
+test("gallery query preselects only hosted cards and scenes", () => {
+  assert.deepEqual(studioSelectionFromQuery("?card=atlas&scene=chronograph"), { card: "atlas", scene: "chronograph" });
+  assert.deepEqual(studioSelectionFromQuery("?card=cadence&scene=nebula"), { card: null, scene: null });
+  assert.deepEqual(studioSelectionFromQuery("?card=identity-beacon&scene=identity-beacon"), { card: null, scene: null });
+  assert.deepEqual(studioSelectionFromQuery(""), { card: null, scene: null });
+});
+
+test("pack and scene selection change the preview configuration key", () => {
+  const baseline = { owner: "octocat", theme: "ember", demo: true };
+  const key = buildStudioConfigurationKey(baseline);
+  assert.equal(key, buildStudioConfigurationKey({ ...baseline, pack: "survey", scenes: [] }));
+  assert.notEqual(key, buildStudioConfigurationKey({ ...baseline, pack: "orbital" }));
+  assert.notEqual(key, buildStudioConfigurationKey({ ...baseline, scenes: ["evidence-coverage"] }));
+});
+
+test("the pre-preview Source link needs a valid handle", () => {
+  assert.equal(isValidStudioOwner("foo bar"), false);
+  assert.equal(buildStudioSourceUrl("foo bar", "Hello-World"), null);
+  assert.equal(buildStudioSourceUrl("octocat", " "), null);
+  assert.equal(isValidStudioOwner("octocat"), true);
+  assert.equal(buildStudioSourceUrl("octocat", "Hello World"), "https://github.com/octocat/Hello%20World");
 });

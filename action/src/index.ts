@@ -1,6 +1,7 @@
 import path from "node:path";
 import * as core from "@actions/core";
-import { generateStatic } from "@commit-atlas/static";
+import { GitHubApiError } from "@commit-atlas/github";
+import { generateStatic, generatedScenePaths, generatedSceneStillPaths } from "@commit-atlas/static";
 
 async function run(): Promise<void> {
   const root = process.env.GITHUB_WORKSPACE;
@@ -9,45 +10,55 @@ async function run(): Promise<void> {
   if (dryRunInput !== "true" && dryRunInput !== "false") {
     throw new Error("dry-run must be true or false");
   }
+  const token = core.getInput("github-token").trim();
   const result = await generateStatic({
     cwd: root,
     configPath: core.getInput("config") || ".commitatlas.json",
     ...(core.getInput("output-dir") ? { outputDir: core.getInput("output-dir") } : {}),
     ...(core.getInput("as-of") ? { asOf: core.getInput("as-of") } : {}),
+    ...(token ? { token } : {}),
     dryRun: dryRunInput === "true",
   });
 
   const outputRoot = relative(root, result.outputDir);
   core.setOutput("manifest", `${outputRoot}/manifest.json`);
+  core.setOutput("scenes", JSON.stringify(generatedScenePaths(result)));
+  core.setOutput("scene-stills", JSON.stringify(generatedSceneStillPaths(result)));
   const generated = new Set(result.manifest.artifacts.map((artifact) => artifact.path));
   for (const [output, artifact] of [
     ["atlas", "atlas.svg"],
     ["atlas-compact", "atlas-compact.svg"],
     ["atlas-wide", "atlas-wide.svg"],
+    ["atlas-still", "atlas-still.svg"],
+    ["atlas-compact-still", "atlas-compact-still.svg"],
+    ["atlas-wide-still", "atlas-wide-still.svg"],
     ["profile", "profile.svg"],
     ["streak", "streak.svg"],
     ["activity", "activity.svg"],
+    ["activity-still", "activity-still.svg"],
     ["breakdown", "breakdown.svg"],
     ["rhythm", "rhythm.svg"],
     ["languages", "languages.svg"],
     ["projects", "projects.svg"],
     ["cadence", "cadence.svg"],
     ["releases", "releases.svg"],
+    ["delivery", "delivery.svg"],
+    ["delivery-json", "delivery.json"],
     ["projects-json", "projects.json"],
     ["projects-markdown", "projects.md"],
   ] as const) {
     core.setOutput(output, generated.has(artifact) ? `${outputRoot}/${artifact}` : "");
   }
-  core.info(`Generated ${result.manifest.artifacts.length} CommitAtlas card(s) for ${result.manifest.user}.`);
+  core.info(`Generated ${result.manifest.artifacts.length} CommitAtlas artifact(s) for ${result.manifest.user}.`);
   const summaryRows: ([string, string] | [{ data: string; header: boolean }, { data: string; header: boolean }])[] = [
     [{ data: "Signal", header: true }, { data: "Value", header: true }],
     ["User", result.manifest.user],
     ["Window", `${result.manifest.window.from} to ${result.manifest.window.to}`],
-    ["Cards", String(result.manifest.artifacts.length)],
+    ["Artifacts", String(result.manifest.artifacts.length)],
     ["Output", outputRoot],
   ];
   for (const variant of result.variants) {
-    summaryRows.push([`Variant · ${variant.theme}`, `${variant.manifest.artifacts.length} cards · ${relative(root, variant.outputDir)}`]);
+    summaryRows.push([`Variant · ${variant.theme}`, `${variant.manifest.artifacts.length} artifacts · ${relative(root, variant.outputDir)}`]);
   }
   await core.summary
     .addHeading("CommitAtlas static portfolio")
@@ -62,5 +73,6 @@ function relative(root: string, target: string): string {
 }
 
 run().catch((error: unknown) => {
-  core.setFailed(error instanceof Error ? error.message : "CommitAtlas generation failed");
+  core.setFailed(error instanceof GitHubApiError ? `[${error.code}] ${error.message}`
+    : error instanceof Error ? error.message : "CommitAtlas generation failed");
 });

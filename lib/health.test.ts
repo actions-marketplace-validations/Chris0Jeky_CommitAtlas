@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CiStateSchema } from "@commit-atlas/core";
+import { GET as getHealth } from "@/app/api/v1/health/route";
 import { CI_RACK_ORDER, CI_STATE_PRESENTATION, summariseCiStates } from "./health";
+import { withWorkerEnv } from "./runtime-env";
 
 test("the rack covers the core CI vocabulary exactly, with no state invented or dropped", () => {
   const core = [...CiStateSchema.options].sort();
@@ -89,4 +91,90 @@ test("an empty board reports nothing rather than a perfect score", () => {
   assert.equal(reading.total, 0);
   assert.equal(reading.headline, "0/0 CI PASSING · 0 ATTENTION");
   assert.doesNotMatch(reading.headline, /UNAVAILABLE|UNCONFIGURED/);
+});
+
+test("passing pins its tone, word, and pulse flag", () => {
+  assert.equal(CI_STATE_PRESENTATION.passing.tone, "good");
+  assert.equal(CI_STATE_PRESENTATION.passing.word, "PASSING");
+  assert.equal(CI_STATE_PRESENTATION.passing.pulses, false);
+});
+
+test("failing pins its tone, word, and pulse flag", () => {
+  assert.equal(CI_STATE_PRESENTATION.failing.tone, "bad");
+  assert.equal(CI_STATE_PRESENTATION.failing.word, "FAILING");
+  assert.equal(CI_STATE_PRESENTATION.failing.pulses, false);
+});
+
+test("pending pins its tone, word, and pulse flag", () => {
+  assert.equal(CI_STATE_PRESENTATION.pending.tone, "warn");
+  assert.equal(CI_STATE_PRESENTATION.pending.word, "PENDING");
+  assert.equal(CI_STATE_PRESENTATION.pending.pulses, true);
+});
+
+test("stale pins its tone, word, and pulse flag", () => {
+  assert.equal(CI_STATE_PRESENTATION.stale.tone, "warn");
+  assert.equal(CI_STATE_PRESENTATION.stale.word, "STALE");
+  assert.equal(CI_STATE_PRESENTATION.stale.pulses, false);
+});
+
+test("unavailable pins its tone, word, and pulse flag", () => {
+  assert.equal(CI_STATE_PRESENTATION.unavailable.tone, "unknown");
+  assert.equal(CI_STATE_PRESENTATION.unavailable.word, "UNAVAILABLE");
+  assert.equal(CI_STATE_PRESENTATION.unavailable.pulses, false);
+});
+
+test("unconfigured pins its tone, word, and pulse flag", () => {
+  assert.equal(CI_STATE_PRESENTATION.unconfigured.tone, "unknown");
+  assert.equal(CI_STATE_PRESENTATION.unconfigured.word, "UNCONFIGURED");
+  assert.equal(CI_STATE_PRESENTATION.unconfigured.pulses, false);
+});
+
+test("summariseCiStates fails closed on an unknown CI state", () => {
+  assert.throws(() => summariseCiStates(["bogus"] as never), /unknown CI state/);
+  assert.throws(() => summariseCiStates(["passing", "bogus"] as never), /unknown CI state/);
+  assert.throws(() => summariseCiStates(["toString"] as never), /unknown CI state/);
+  assert.throws(() => summariseCiStates(["constructor"] as never), /unknown CI state/);
+});
+
+test("an unknown CI state has no presentation and never falls back to a healthy tone", () => {
+  const byKey = CI_STATE_PRESENTATION as unknown as Record<string, unknown>;
+  assert.equal(byKey["bogus"], undefined);
+  assert.equal(byKey[""], undefined);
+  for (const state of Object.values(CI_STATE_PRESENTATION)) {
+    assert.ok(
+      state.tone === "good" || state.tone === "warn" || state.tone === "bad" || state.tone === "unknown",
+      `${state.state} carries an out-of-vocabulary tone`,
+    );
+  }
+});
+
+test("health rejects an unknown user parameter with 400 invalid_input", async () => {
+  const response = await withWorkerEnv({ GITHUB_TOKEN: "" }, () =>
+    getHealth(new Request("https://example.test/api/v1/health?user=octocat")),
+  );
+  assert.equal(response.status, 400);
+  const payload = (await response.json()) as { status?: string; error?: { code?: string; message?: string } };
+  assert.equal(payload.status, "error");
+  assert.equal(payload.error?.code, "invalid_input");
+  assert.match(payload.error?.message ?? "", /unknown query parameter: user/);
+});
+
+test("health rejects a typo parameter with 400 invalid_input", async () => {
+  const response = await withWorkerEnv({ GITHUB_TOKEN: "" }, () =>
+    getHealth(new Request("https://example.test/api/v1/health?users=octocat")),
+  );
+  assert.equal(response.status, 400);
+  const payload = (await response.json()) as { status?: string; error?: { code?: string; message?: string } };
+  assert.equal(payload.status, "error");
+  assert.equal(payload.error?.code, "invalid_input");
+  assert.match(payload.error?.message ?? "", /unknown query parameter: users/);
+});
+
+test("bare health still returns 200 status ok", async () => {
+  const response = await withWorkerEnv({ GITHUB_TOKEN: "" }, () =>
+    getHealth(new Request("https://example.test/api/v1/health")),
+  );
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as { status?: string };
+  assert.equal(payload.status, "ok");
 });

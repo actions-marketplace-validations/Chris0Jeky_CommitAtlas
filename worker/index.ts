@@ -3,6 +3,7 @@ import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } fr
 import handler from "vinext/server/app-router-entry";
 import { InputError } from "@/lib/github/validation";
 import { apiErrorResponse } from "@/lib/http";
+import { stampGalleryResponse } from "@/lib/gallery";
 import { withPublicLastGood, type LastGoodStore } from "@/lib/last-good";
 import { getGitHubToken, withWorkerEnv, type CommitAtlasWorkerEnv } from "@/lib/runtime-env";
 
@@ -10,7 +11,7 @@ interface Env extends CommitAtlasWorkerEnv, CloudflareBindings {
   ASSETS: {
     fetch(request: Request): Promise<Response>;
   };
-  IMAGES: {
+  IMAGES?: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
         output(options: { format: string; quality: number }): Promise<{ response(): Response }>;
@@ -21,6 +22,42 @@ interface Env extends CommitAtlasWorkerEnv, CloudflareBindings {
 
 interface ExecutionContext {
   waitUntil(promise: Promise<unknown>): void;
+}
+
+// Production HTML has inline Vinext hydration/pre-paint scripts and inline
+// React/SDK styles. This is a bounded source allowlist, not a nonce-based XSS
+// boundary. Keep eval and event-handler attributes disabled. Fonts and scripts
+// are bundled locally; Studio decodes fetched SVGs through blob: image URLs.
+const HTML_CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-src 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "script-src-attr 'none'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self'",
+  "connect-src 'self' https://pulseboard-observatory.commit-atlas.workers.dev",
+  "worker-src 'none'",
+].join("; ");
+
+function withHtmlSecurityHeaders(response: Response): Response {
+  if (!/^text\/html(?:\s*;|\s*$)/i.test(response.headers.get("content-type") ?? "")) return response;
+  const headers = new Headers(response.headers);
+  // Do not weaken an explicit policy supplied by a route/framework. Development
+  // uses Vite HMR and Google CDN fonts; never enable those sources in production.
+  if (!headers.has("Content-Security-Policy") && process.env.NODE_ENV !== "development") {
+    headers.set("Content-Security-Policy", HTML_CONTENT_SECURITY_POLICY);
+  }
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Referrer-Policy", "no-referrer");
+  headers.set("X-Frame-Options", "DENY");
+  // Preserve the original stream, status, cache policy and validators, including
+  // the gallery's bodyless 304. Never buffer or rewrite hydration payloads here.
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
 // Image security config. SVG sources with .svg extension auto-skip the
@@ -42,16 +79,30 @@ const worker = {
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
-      return handleImageOptimization(request, {
-        fetchAsset: (path) => env.ASSETS.fetch(new Request(new URL(path, request.url))),
-        transformImage: async (body, { width, format, quality }) => {
-          const result = await env.IMAGES.input(body).transform(width > 0 ? { width } : {}).output({ format, quality });
-          return result.response();
-        },
-      }, allowedWidths);
+      // No images binding is configured (wrangler.jsonc declares only LAST_GOOD),
+      // so pass no transform: vinext serves the source with the same
+      // security/cache headers instead of throwing inside the transform.
+      const images = env.IMAGES;
+      try {
+        return await handleImageOptimization(request, {
+          fetchAsset: (path) => env.ASSETS.fetch(new Request(new URL(path, request.url))),
+          ...(images ? {
+            transformImage: async (body, { width, format, quality }) => {
+              const result = await images.input(body).transform(width > 0 ? { width } : {}).output({ format, quality });
+              return result.response();
+            },
+          } : {}),
+        }, allowedWidths);
+      } catch {
+        // Binding errors can contain internal details; keep logs and the response bounded.
+        return apiErrorResponse(new Error("Image optimization failed"));
+      }
     }
 
-    return withWorkerEnv(env, async () => {
+    const response = await withWorkerEnv(env, async () => {
+      if (url.pathname === "/gallery") {
+        return stampGalleryResponse(request, await handler.fetch(request, env, ctx));
+      }
       const binding = (env as Partial<CloudflareBindings>).LAST_GOOD;
       const store: LastGoodStore | undefined = binding ? {
         get: (key) => binding.get(key, "text"),
@@ -67,6 +118,7 @@ const worker = {
         },
       );
     });
+    return withHtmlSecurityHeaders(response);
   },
 };
 

@@ -55,6 +55,42 @@ test("profile adapter falls back to login and preserves source-backed stars", ()
   });
 });
 
+test("card adapters preserve degraded data state separately from source provenance", () => {
+  const profileSnapshot: ProfileSnapshot = {
+    version: 1, login: "octocat", name: "Octocat", profileUrl: "https://github.com/octocat",
+    publicRepositories: 1, followers: 2, following: 3, stars: 4, forks: 0,
+    primaryLanguages: [{ name: "TypeScript", repositories: 1, share: 100 }],
+    latestPushAt: null, repositoriesTruncated: false, freshness,
+  };
+  const board: ProjectBoardSnapshot = {
+    version: 1, owner: "octocat", freshness, projects: [],
+  };
+  const days = Array.from({ length: 7 }, (_, index) => ({
+    date: new Date(Date.UTC(2026, 7, 14 + index)).toISOString().slice(0, 10),
+    count: index % 2, level: index % 2,
+  }));
+
+  for (const mode of ["partial", "stale", "unavailable"] as const) {
+    const degradedFreshness = { generatedAt: freshness.generatedAt, source: "github-rest" as const, mode };
+    const degradedProfile = { ...profileSnapshot, freshness: degradedFreshness };
+    const degradedContributions = { ...contributions(days), freshness: degradedFreshness };
+    const degradedBoard = { ...board, freshness: degradedFreshness };
+
+    for (const card of [
+      toProfileCard(degradedProfile),
+      toLanguagesCard(degradedProfile),
+      toStreakCard(degradedContributions, 7),
+      toActivityCard(degradedContributions, 7),
+      toContributionMetricsCards(degradedContributions, 7).breakdown,
+      toContributionMetricsCards(degradedContributions, 7).rhythm,
+      toProjectBoard(degradedBoard),
+    ]) {
+      assert.equal(card.source, "public-github");
+      assert.equal(card.dataState, mode);
+    }
+  }
+});
+
 test("contribution adapters sort leap-day input and use its latest UTC day as as-of", () => {
   const snapshot = contributions([
     { date: "2024-03-02", count: 3 },
@@ -104,6 +140,39 @@ test("contribution adapters preserve a streak through yesterday while the final 
   });
   assert.equal(cards.rhythm.currentStreak, 2);
   assert.equal(cards.rhythm.currentStreakThrough, "2026-08-19");
+});
+
+test("the activity adapter caps its calendar and totals without capping streak history", () => {
+  const days = Array.from({ length: 731 }, (_, index) => ({
+    date: new Date(Date.UTC(2024, 2, 2 - (730 - index))).toISOString().slice(0, 10),
+    count: index === 0 ? 0 : 1,
+    level: index === 0 ? 0 : 2,
+  }));
+  const snapshot = contributions([...days].reverse());
+  const activity = toActivityCard(snapshot, 731);
+  const streak = toStreakCard(snapshot, 731);
+
+  assert.equal(activity.days.length, 365);
+  assert.equal(activity.periodLabel, "2023-03-04 → 2024-03-02");
+  assert.equal(activity.total, 365);
+  assert.deepEqual(activity.days.find(({ date }) => date === "2024-02-29"), {
+    date: "2024-02-29", count: 1, level: 2,
+  });
+  assert.equal(streak.current, 730);
+  assert.equal(streak.longest, 730);
+  assert.equal(streak.windowDays, 731);
+  assert.equal(snapshot.days.length, 731);
+});
+
+test("the activity display cap does not conceal a gap in fetched history", () => {
+  const days = Array.from({ length: 731 }, (_, index) => ({
+    date: new Date(Date.UTC(2024, 2, 2 - (730 - index))).toISOString().slice(0, 10),
+    count: 1,
+  })).filter((_, index) => index !== 20);
+  assert.throws(
+    () => toActivityCard(contributions(days), 731),
+    (error: unknown) => error instanceof GitHubApiError && error.code === "invalid_response",
+  );
 });
 
 test("an explicit all-zero calendar renders a zero streak rather than becoming unavailable", () => {

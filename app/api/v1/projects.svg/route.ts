@@ -1,10 +1,11 @@
+import { cardSvgResponse } from "@/lib/card-response";
 import { demoProjects } from "@/lib/github/demo";
 import { GitHubClient } from "@/lib/github/client";
 import { parseSvgProjectsQuery } from "@/lib/svg-routes";
 import { toProjectBoard } from "@/lib/svg-adapters";
-import { apiErrorResponse, canonicalSvgRedirect, optionsResponse, svgResponse } from "@/lib/http";
+import { apiErrorResponse, canonicalSvgRedirect, optionsResponse } from "@/lib/http";
 import { getGitHubToken } from "@/lib/runtime-env";
-import { renderProjectBoard } from "@/packages/svg/src/index";
+import { motionRenderMetadata, renderProjectBoard } from "@/packages/svg/src/index";
 
 export const dynamic = "force-dynamic";
 
@@ -24,7 +25,7 @@ export async function GET(request: Request): Promise<Response> {
       title: `${query.owner} project signals`,
       description: "Project lifecycle and configured CI signals for selected public GitHub repositories.",
     });
-    return svgResponse(request, body, { edgeSeconds: 300, publicData, inlineStyles: query.motion === "subtle" });
+    return await cardSvgResponse(request, body, { edgeSeconds: 300, publicData, inlineStyles: motionRenderMetadata(query.motion).inlineStyles }, "projects", snapshot.freshness.mode);
   } catch (error) {
     return apiErrorResponse(error);
   }

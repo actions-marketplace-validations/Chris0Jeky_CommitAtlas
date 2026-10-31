@@ -12,6 +12,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./lens": {
+      "types": "./dist/lens-projection.d.ts",
+      "import": "./dist/lens-projection.js",
+      "default": "./dist/lens-projection.js"
     }
   },
   "scripts": {
@@ -21,6 +26,6 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
-    "zod": "^4.5.4"
+    "zod": "^4.6.7"
   }
 }

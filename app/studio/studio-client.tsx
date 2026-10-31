@@ -1,35 +1,60 @@
 "use client";
 
-import { useMemo, useState, type FormEvent } from "react";
+import type { HostedMotionProfile, ScenePack } from "@/packages/svg/src/index";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from "react";
 import { ChassisFooter, ConsoleHeader, STUDIO_LINKS } from "../chassis/console";
 import { WorkflowMap } from "../chassis/workflow-map";
 import {
   isStudioCardAvailable,
+  projectsForValidatedPreview,
   resolveStudioLiveEvidence,
 } from "./studio-card-availability";
 import { buildStudioMarkdown, STUDIO_CARD_KINDS, STUDIO_CARD_LABELS } from "./studio-markdown";
 import {
   configurationChangedNotice,
   contributionUnavailableNotice,
+  previewLoadedNotice,
   retainedPreviewNotice,
   unconfirmedEvidenceNotice,
 } from "./studio-messages";
 import {
   buildStudioGalleryCards,
+  describeProjectActionUrl,
   findProjectDraft,
-  safeProjectActionUrl,
   starterCiPresentation,
+  studioDashboardProjectHeading,
+  studioProjectCiReading,
   studioSourceLabel,
-  type StudioGalleryCard,
 } from "./studio-presentation";
 import {
   buildStudioConfigurationKey,
   buildStudioRouteUrl,
+  buildStudioSceneUrl,
+  buildStudioSourceUrl,
+  isValidStudioOwner,
+  isValidStudioWorkflowInput,
+  STUDIO_PREVIEW_DAYS,
+  STUDIO_SCENE_IDS,
+  STUDIO_SCENE_LABELS,
+  STUDIO_SCENE_PACKS,
   isCopyableStudioOrigin,
   isStudioPreviewCurrent,
   resolveStudioBaseUrl,
+  studioSelectionFromQuery,
   type StudioCardKind,
 } from "./studio-urls";
+import {
+  pulseboardCardTheme,
+  pulseboardEvent,
+  pulseboardRepoCountBucket,
+  pulseboardSmallCount,
+  whenPulseboardReady,
+} from "@/lib/pulseboard";
+import { fetchJson } from "./studio-fetch";
+import { StudioCardPreview } from "./studio-card-preview-image";
+import { StudioScenePreview } from "./studio-scene-preview-image";
+import { StudioPreviewButtons } from "./studio-svg-preview";
+import { scenePreviewToken, sceneReceiptMatches, type SceneImageReceipt, type ScenePreviewView } from "./studio-scene-preview";
 
 type Lifecycle = "planned" | "active" | "maintenance" | "paused" | "archived";
 type CardKind = StudioCardKind;
@@ -98,8 +123,10 @@ interface PreviewConfiguration {
   projects: ProjectDraft[];
   theme: string;
   demo: boolean;
-  motion: "none" | "subtle";
+  motion: HostedMotionProfile;
   layout: "wide" | "compact";
+  pack: ScenePack;
+  scenes: readonly string[];
   hasContributions: boolean;
   hasLanguages: boolean;
 }
@@ -122,7 +149,7 @@ const starterProfile: ProfileSnapshot = {
 };
 
 const starterContributionDays = Array.from(
-  { length: 120 },
+  { length: STUDIO_PREVIEW_DAYS },
   (_, index) => ({ date: `demo-${index}`, count: (index * 5) % 8 }),
 );
 
@@ -138,15 +165,33 @@ const starterContributions: ContributionSnapshot = {
 
 let nextProjectId = 3;
 const PLACEHOLDER_BASE_URL = "https://your-commitatlas-host.example";
+// Client-side mirror of the shared REPOSITORY rule in packages/github/src/validation.ts.
+const REPOSITORY = /^(?!\.\.?$)[a-z\d._-]{1,100}$/i;
 
 export default function StudioClient() {
   const [handle, setHandle] = useState("octocat");
   const [demo, setDemo] = useState(true);
   const [theme, setTheme] = useState("ember");
-  const [motion, setMotion] = useState<"none" | "subtle">("subtle");
+  const [motion, setMotion] = useState<HostedMotionProfile>("subtle");
+  const [pack, setPack] = useState<ScenePack>("survey");
+  const gallerySearch = useSyncExternalStore(() => () => {}, () => window.location.search, () => "");
+  const gallerySelection = studioSelectionFromQuery(gallerySearch);
+  const [sceneOverride, setSceneOverride] = useState<Set<string> | null>(null);
+  const [cardOverride, setCardOverride] = useState<Set<CardKind> | null>(null);
+  const selectedScenes = useMemo(
+    () => sceneOverride ?? new Set<string>(gallerySelection.scene ? [gallerySelection.scene] : []),
+    [gallerySelection.scene, sceneOverride],
+  );
+  const selectedCards = useMemo(
+    () => cardOverride ?? new Set<CardKind>(gallerySelection.card ? [gallerySelection.card] : ["atlas", "projects"]),
+    [cardOverride, gallerySelection.card],
+  );
+  const [sceneView, setSceneView] = useState<ScenePreviewView>("profile");
+  const [sceneReplay, setSceneReplay] = useState(0);
+  const [renderedCards, setRenderedCards] = useState<ReadonlyMap<string, SceneImageReceipt>>(() => new Map());
+  const [renderedScenes, setRenderedScenes] = useState<ReadonlyMap<string, SceneImageReceipt>>(() => new Map());
   const [layout, setLayout] = useState<"wide" | "compact">("wide");
   const [projects, setProjects] = useState<ProjectDraft[]>(starterProjects);
-  const [selectedCards, setSelectedCards] = useState<Set<CardKind>>(() => new Set(["atlas", "projects"]));
   const [profile, setProfile] = useState<ProfileSnapshot>(starterProfile);
   const [contributions, setContributions] = useState<ContributionSnapshot | null>(starterContributions);
   const [board, setBoard] = useState<ProjectBoardSnapshot | null>(null);
@@ -167,18 +212,14 @@ export default function StudioClient() {
     demo: true,
     motion: "subtle",
     layout: "wide",
+    pack: "survey",
+    scenes: [],
     hasContributions: true,
     hasLanguages: true,
   });
-  const [atlasPreviewUrl, setAtlasPreviewUrl] = useState(() => buildStudioRouteUrl("atlas", {
-    owner: "octocat",
-    projects: starterProjects,
-    theme: "ember",
-    demo: true,
-    days: 365,
-    motion: "subtle",
-    layout: "wide",
-  }));
+
+  // Usage signal for the Studio itself: no props, and a no-op when the SDK is absent or blocked.
+  useEffect(() => whenPulseboardReady(() => { pulseboardEvent({ name: "studio.opened", props: {} }); }), []);
 
   const activeProjects = useMemo(() => projects.filter((project) => project.repo.trim()), [projects]);
   const configurationKey = useMemo(() => buildStudioConfigurationKey({
@@ -186,21 +227,33 @@ export default function StudioClient() {
     projects: activeProjects,
     theme,
     demo,
-    days: 365,
+    days: STUDIO_PREVIEW_DAYS,
     motion,
     layout,
-  }), [activeProjects, demo, handle, layout, motion, theme]);
+    pack,
+    scenes: [...selectedScenes].sort(),
+  }), [activeProjects, demo, handle, layout, motion, pack, selectedScenes, theme]);
   const previewConfigurationKey = useMemo(() => buildStudioConfigurationKey({
     owner: previewConfiguration.owner,
     projects: previewConfiguration.projects,
     theme: previewConfiguration.theme,
     demo: previewConfiguration.demo,
-    days: 365,
+    days: STUDIO_PREVIEW_DAYS,
     motion: previewConfiguration.motion,
     layout: previewConfiguration.layout,
+    pack: previewConfiguration.pack,
+    scenes: previewConfiguration.scenes,
   }), [previewConfiguration]);
   const configurationIsValidated = isStudioPreviewCurrent(configurationKey, validatedPreview);
   const visibleBoard = configurationIsValidated ? board : null;
+  const visibleProjectDrafts = configurationIsValidated ? previewConfiguration.projects : activeProjects;
+  const boardWithheld = configurationIsValidated && visibleBoard === null && activeProjects.length > 0 && previewConfiguration.projects.length === 0;
+  const dashboardHeading = studioDashboardProjectHeading({
+    boardCount: visibleBoard ? visibleBoard.projects.length : null,
+    visibleDeclaredCount: visibleProjectDrafts.length,
+    typedCount: activeProjects.length,
+    boardWithheld,
+  });
   const visibleNotice = phase === "ready" && validatedPreview && !configurationIsValidated
     ? configurationChangedNotice()
     : notice;
@@ -217,12 +270,6 @@ export default function StudioClient() {
   // configuration has not confirmed it yet.
   const previewIsRetained = configurationKey !== previewConfigurationKey || refreshUnresolved;
   const baseUrl = resolveStudioBaseUrl(configurationKey, validatedPreview, PLACEHOLDER_BASE_URL);
-  const compactAtlasPreviewUrl = atlasPreviewUrl.includes("layout=wide")
-    ? atlasPreviewUrl.replace("layout=wide", "layout=compact")
-    : atlasPreviewUrl;
-  const wideAtlasPreviewUrl = atlasPreviewUrl.includes("layout=compact")
-    ? atlasPreviewUrl.replace("layout=compact", "layout=wide")
-    : atlasPreviewUrl;
   const galleryAvailability = {
     demo: previewConfiguration.demo,
     hasCurrentContributions: previewConfiguration.hasContributions,
@@ -233,33 +280,74 @@ export default function StudioClient() {
     availability: galleryAvailability,
     projectCount: previewConfiguration.projects.length,
   });
+  const galleryScenes = STUDIO_SCENE_IDS.filter((id) => previewConfiguration.scenes.includes(id));
+  const previewCount = galleryCards.length + galleryScenes.length;
   const previewUrls = useMemo(() => Object.fromEntries(STUDIO_CARD_KINDS.map((kind) => [kind, buildStudioRouteUrl(kind, {
     owner: previewConfiguration.owner,
     projects: previewConfiguration.projects,
     theme: previewConfiguration.theme,
     demo: previewConfiguration.demo,
-    days: 365,
+    days: STUDIO_PREVIEW_DAYS,
     motion: previewConfiguration.motion,
     layout: previewConfiguration.layout,
   })])) as Record<CardKind, string>, [previewConfiguration]);
   const markdown = useMemo(() => {
     return buildStudioMarkdown({
       baseUrl,
-      owner: handle.trim() || "octocat",
-      projects: activeProjects,
-      theme,
-      demo,
+      owner: previewConfiguration.owner,
+      projects: previewConfiguration.projects,
+      theme: previewConfiguration.theme,
+      demo: previewConfiguration.demo,
       selectedCards,
+      renderedCardIds: new Set(STUDIO_CARD_KINDS.filter(id => sceneReceiptMatches(
+        renderedCards.get(id), scenePreviewToken(previewConfigurationKey, id, sceneView, sceneReplay),
+        previewUrls[id], renderedCards.get(id)?.view ?? sceneView))),
       hasCurrentContributions,
       hasCurrentLanguages,
-      motion,
-      layout,
+      motion: previewConfiguration.motion,
+      layout: previewConfiguration.layout,
+      pack: previewConfiguration.pack,
+      selectedScenes,
+      renderedSceneIds: new Set(STUDIO_SCENE_IDS.filter((id) => sceneReceiptMatches(
+        renderedScenes.get(id), scenePreviewToken(previewConfigurationKey, id, sceneView, sceneReplay),
+        buildStudioSceneUrl(id, { owner: previewConfiguration.owner, projects: previewConfiguration.projects,
+          theme: previewConfiguration.theme, demo: previewConfiguration.demo, days: STUDIO_PREVIEW_DAYS,
+          motion: previewConfiguration.motion, layout: previewConfiguration.layout, pack: previewConfiguration.pack }), renderedScenes.get(id)?.view ?? sceneView))),
     });
-  }, [activeProjects, baseUrl, demo, handle, hasCurrentContributions, hasCurrentLanguages, layout, motion, selectedCards, theme]);
+  }, [baseUrl, hasCurrentContributions, hasCurrentLanguages, previewConfiguration, previewConfigurationKey, previewUrls, renderedCards, renderedScenes, sceneView, sceneReplay, selectedCards, selectedScenes]);
+  const markSceneRendered = useCallback((id: string, token: string, receipt: SceneImageReceipt | null) => {
+    setRenderedScenes((current) => {
+      if (receipt === null && current.get(id)?.token !== token) return current;
+      const next = new Map(current);
+      if (receipt) next.set(id, receipt); else next.delete(id);
+      return next;
+    });
+  }, []);
+  const markCardRendered = useCallback((id: string, token: string, receipt: SceneImageReceipt | null) => {
+    setRenderedCards((current) => {
+      if (receipt === null && current.get(id)?.token !== token) return current;
+      const next = new Map(current);
+      if (receipt) next.set(id, receipt); else next.delete(id);
+      return next;
+    });
+  }, []);
+  function changeSceneView(view: ScenePreviewView) {
+    setSceneView(view);
+    setSceneReplay(current => current + 1);
+  }
+  const sceneRouteOptions = {
+    owner: previewConfiguration.owner,
+    projects: previewConfiguration.projects,
+    theme: previewConfiguration.theme,
+    demo: previewConfiguration.demo,
+    days: STUDIO_PREVIEW_DAYS,
+    layout: previewConfiguration.layout,
+    pack: previewConfiguration.pack,
+  };
   const previewIsValidated = configurationIsValidated && !refreshUnresolved;
   const markdownReady = previewIsValidated && isCopyableStudioOrigin(baseUrl);
   const visibleMarkdown = markdownReady
-    ? markdown || "Select one or more cards to generate Markdown."
+    ? markdown || "Select an image and wait for its profile preview to load before copying Markdown."
     : previewIsValidated
       ? "Preview validated. README copying is available from a deployed HTTPS Studio; local previews remain local."
       : "Run Preview to validate this configuration and bind its card URLs before copying Markdown.";
@@ -267,9 +355,22 @@ export default function StudioClient() {
   async function preview(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const login = handle.trim();
-    if (!/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i.test(login)) {
+    if (!isValidStudioOwner(login)) {
       setPhase("error");
       setNotice(retainedPreviewNotice("Enter a valid GitHub handle before previewing.", profile.login));
+      return;
+    }
+
+    const invalidRepo = activeProjects.find((project) => !REPOSITORY.test(project.repo.trim()));
+    if (invalidRepo) {
+      setPhase("error");
+      setNotice(retainedPreviewNotice("Enter a valid repository name before previewing.", profile.login));
+      return;
+    }
+
+    if (activeProjects.some((project) => !isValidStudioWorkflowInput(project.workflow))) {
+      setPhase("error");
+      setNotice(retainedPreviewNotice("Enter a valid workflow before previewing: a file name or path such as ci.yml without . or .. segments or control characters, or leave it blank", profile.login));
       return;
     }
 
@@ -278,9 +379,11 @@ export default function StudioClient() {
       projects: activeProjects,
       theme,
       demo,
-      days: 365,
+      days: STUDIO_PREVIEW_DAYS,
       motion,
       layout,
+      pack,
+      scenes: [...selectedScenes].sort(),
     });
 
     setPhase("loading");
@@ -288,46 +391,41 @@ export default function StudioClient() {
     setNotice(`Loading ${demo ? "synthetic" : "live public"} GitHub signals for @${login}…`);
     try {
       const common = `user=${encodeURIComponent(login)}&demo=${demo}`;
-      const contributionPromise = fetchJson<ContributionSnapshot>(`/api/v1/contributions?${common}&days=120`)
+      const contributionPromise = fetchJson<ContributionSnapshot>(`/api/v1/contributions?${common}&days=${STUDIO_PREVIEW_DAYS}`)
         .then((value) => ({ value, error: null }))
         .catch((error: unknown) => ({ value: null, error }));
-      const [nextProfile, contributionResult, nextBoard] = await Promise.all([
+      const boardPromise = (activeProjects.length
+        ? fetchJson<ProjectBoardSnapshot>(buildStudioRouteUrl("projects", {
+            owner: login,
+            projects: activeProjects,
+            theme,
+            demo,
+          }, "json"))
+        : Promise.resolve(null))
+        .then((value) => ({ value, error: null }))
+        .catch((error: unknown) => ({ value: null, error }));
+      const [nextProfile, contributionResult, boardResult] = await Promise.all([
         fetchJson<ProfileSnapshot>(`/api/v1/profile?${common}`),
         contributionPromise,
-        activeProjects.length
-          ? fetchJson<ProjectBoardSnapshot>(buildStudioRouteUrl("projects", {
-              owner: login,
-              projects: activeProjects,
-              theme,
-              demo,
-            }, "json"))
-          : Promise.resolve(null),
+        boardPromise,
       ]);
 
       setProfile(nextProfile);
       setContributions(contributionResult.value);
-      setBoard(nextBoard);
+      setBoard(boardResult.value);
+      setSceneReplay(current => current + 1);
       setPreviewConfiguration({
         owner: login,
-        projects: activeProjects.map((project) => ({ ...project })),
+        projects: projectsForValidatedPreview(activeProjects, !boardResult.error),
         theme,
         demo,
         motion,
         layout,
+        pack,
+        scenes: [...selectedScenes].sort(),
         hasContributions: contributionResult.value !== null,
         hasLanguages: !nextProfile.repositoriesTruncated,
       });
-      if (contributionResult.value) {
-        setAtlasPreviewUrl(buildStudioRouteUrl("atlas", {
-          owner: login,
-          projects: activeProjects,
-          theme,
-          demo,
-          days: 365,
-          motion,
-          layout,
-        }));
-      }
       setValidatedPreview({ key: requestedConfigurationKey, origin: window.location.origin });
       // Resolve only this run's key; any other configuration left unconfirmed stays so.
       setUnresolvedRefreshKeys((current) => {
@@ -336,10 +434,23 @@ export default function StudioClient() {
         return next;
       });
       setPhase("ready");
+      // Only a bucketed repository count, the data source and small counts: never the handle,
+      // repository names or URLs typed into the form.
+      pulseboardEvent({
+        name: "profile.loaded",
+        props: {
+          repoCountBucket: pulseboardRepoCountBucket(nextProfile.publicRepositories),
+          source: demo ? "synthetic" : "live",
+          projects: pulseboardSmallCount(activeProjects.length),
+          contributions: contributionResult.value !== null,
+        },
+      });
       setNotice(
         contributionResult.error
           ? contributionUnavailableNotice()
-          : `${demo ? "Synthetic" : "Live public"} preview loaded. Source and generation time are shown below.`,
+          : boardResult.error
+            ? "Available public signals loaded. Project board is unavailable for this preview and was omitted; no value was guessed."
+            : previewLoadedNotice(demo),
       );
     } catch (error) {
       setPhase("error");
@@ -353,8 +464,9 @@ export default function StudioClient() {
   }
 
   function toggleCard(kind: CardKind) {
-    setSelectedCards((current) => {
-      const next = new Set(current);
+    setRenderedCards(current => { const next = new Map(current); next.delete(kind); return next; });
+    setCardOverride((current) => {
+      const next = new Set(current ?? selectedCards);
       if (next.has(kind)) next.delete(kind);
       else next.add(kind);
       return next;
@@ -373,6 +485,10 @@ export default function StudioClient() {
     try {
       await navigator.clipboard.writeText(markdown);
       setNotice("README Markdown copied to your clipboard.");
+      pulseboardEvent({
+        name: "card.exported",
+        props: { format: "markdown", theme: pulseboardCardTheme(theme), cards: pulseboardSmallCount(selectedCards.size) },
+      });
     } catch {
       setNotice("Clipboard access was unavailable. Select the Markdown and copy it manually.");
     }
@@ -419,7 +535,39 @@ export default function StudioClient() {
           <fieldset className="segmented-field">
             <legend>Load motion</legend>
             <label><input type="radio" name="motion" checked={motion === "subtle"} onChange={() => setMotion("subtle")} /><span><strong>Subtle</strong><small>Reduced-motion safe</small></span></label>
+            <label><input type="radio" name="motion" checked={motion === "ambient"} onChange={() => setMotion("ambient")} /><span><strong>Ambient</strong><small>Subtle-compatible</small></span></label>
             <label><input type="radio" name="motion" checked={motion === "none"} onChange={() => setMotion("none")} /><span><strong>Still</strong><small>Static export</small></span></label>
+          </fieldset>
+
+          <fieldset className="segmented-field">
+            <legend>Scene pack</legend>
+            {STUDIO_SCENE_PACKS.map((value) => (
+              <label key={value}>
+                <input type="radio" name="pack" checked={pack === value} onChange={() => setPack(value)} />
+                <span><strong>{value[0].toUpperCase() + value.slice(1)}</strong><small>{value === "survey" ? "Default geometry" : "Alternate geometry"}</small></span>
+              </label>
+            ))}
+          </fieldset>
+
+          <fieldset className="card-picker">
+            <legend>Scenes to show &amp; copy</legend>
+            {STUDIO_SCENE_IDS.map((id) => (
+              <label key={id}>
+                <input type="checkbox" checked={selectedScenes.has(id)} onChange={() => setSceneOverride((current) => {
+                  const next = new Set(current ?? selectedScenes);
+                  if (next.has(id)) next.delete(id);
+                  else next.add(id);
+                  return next;
+                })} />
+                <span>{STUDIO_SCENE_LABELS[id]}</span>
+              </label>
+            ))}
+          </fieldset>
+
+          <fieldset className="preview-tools">
+            <legend>Preview tools</legend>
+            <p>Apply to all card and scene previews. Each image also has its own controls.</p>
+            <StudioPreviewButtons view={sceneView} choose={changeSceneView} disabled={selectedScenes.size === 0 && selectedCards.size === 0} />
           </fieldset>
 
           <fieldset className="card-picker">
@@ -454,10 +602,10 @@ export default function StudioClient() {
                   <label>Repository<input aria-label={`Project ${index + 1} repository`} value={project.repo} onChange={(event) => updateProject(project.id, { repo: event.target.value })} maxLength={100} placeholder="repository-name" /></label>
                   <label>Lifecycle<select aria-label={`Project ${index + 1} lifecycle`} value={project.lifecycle} onChange={(event) => updateProject(project.id, { lifecycle: event.target.value as Lifecycle })}><option value="planned">Planned</option><option value="active">Active</option><option value="maintenance">Maintenance</option><option value="paused">Paused</option><option value="archived">Archived</option></select></label>
                   <label>Workflow (optional)<input aria-label={`Project ${index + 1} workflow (optional)`} value={project.workflow} onChange={(event) => updateProject(project.id, { workflow: event.target.value })} maxLength={120} placeholder="ci.yml" /></label>
-                  <label>Docs URL (optional)<input aria-label={`Project ${index + 1} docs URL (optional)`} type="url" value={project.docs} onChange={(event) => updateProject(project.id, { docs: event.target.value })} maxLength={500} placeholder="https://…" /></label>
-                  <label>Install URL (optional)<input aria-label={`Project ${index + 1} install URL (optional)`} type="url" value={project.install} onChange={(event) => updateProject(project.id, { install: event.target.value })} maxLength={500} placeholder="https://…" /></label>
-                  <label>Download URL (optional)<input aria-label={`Project ${index + 1} download URL (optional)`} type="url" value={project.download} onChange={(event) => updateProject(project.id, { download: event.target.value })} maxLength={500} placeholder="https://…" /></label>
-                  <button className="remove-project" type="button" aria-label={`Remove project ${index + 1}: ${project.repo || "new project"}`} onClick={() => setProjects((current) => current.filter((item) => item.id !== project.id))}>Remove {project.repo || "project"}</button>
+                  <label>Docs URL (optional)<input aria-label={`Project ${index + 1} docs URL (optional)`} type="text" value={project.docs} onChange={(event) => updateProject(project.id, { docs: event.target.value })} maxLength={500} placeholder="https://…" inputMode="url" /></label>
+                  <label>Install URL (optional)<input aria-label={`Project ${index + 1} install URL (optional)`} type="text" value={project.install} onChange={(event) => updateProject(project.id, { install: event.target.value })} maxLength={500} placeholder="https://…" inputMode="url" /></label>
+                  <label>Download URL (optional)<input aria-label={`Project ${index + 1} download URL (optional)`} type="text" value={project.download} onChange={(event) => updateProject(project.id, { download: event.target.value })} maxLength={500} placeholder="https://…" inputMode="url" /></label>
+                  <button className="remove-project" type="button" aria-label={`Remove ${project.repo || "project"}, project ${index + 1}`} onClick={() => setProjects((current) => current.filter((item) => item.id !== project.id))}>Remove {project.repo || "project"}</button>
                 </div>
               </details>
             ))}
@@ -479,7 +627,7 @@ export default function StudioClient() {
           <p className={`studio-notice ${phase}`} role="status" aria-live="polite">{visibleNotice}</p>
 
           <div className="gallery-heading">
-            <div><p>Selected card gallery</p><h3>{galleryCards.length} preview{galleryCards.length === 1 ? "" : "s"}</h3></div>
+            <div><p>Selected cards &amp; scenes</p><h3>{previewCount} preview{previewCount === 1 ? "" : "s"}</h3></div>
             <fieldset className="preview-canvas-control">
               <legend>Preview canvas</legend>
               {(["auto", "dark", "light"] as const).map((canvas) => (
@@ -494,11 +642,13 @@ export default function StudioClient() {
           <div className={`studio-card-gallery canvas-${previewCanvas}`}>
             {galleryCards.map((card) => (
               <StudioCardPreview
-                key={card.kind}
+                key={scenePreviewToken(previewConfigurationKey, card.kind, sceneView, sceneReplay)}
                 card={card}
-                url={card.kind === "atlas" ? atlasPreviewUrl : previewUrls[card.kind]}
-                imageUrl={card.kind === "atlas" ? wideAtlasPreviewUrl : previewUrls[card.kind]}
-                compactUrl={card.kind === "atlas" ? compactAtlasPreviewUrl : null}
+                url={previewUrls[card.kind]}
+                stillUrl={buildStudioRouteUrl(card.kind, { ...sceneRouteOptions, motion: "none" })}
+                view={sceneView}
+                token={scenePreviewToken(previewConfigurationKey, card.kind, sceneView, sceneReplay)}
+                onRendered={markCardRendered}
                 login={profile.login}
                 source={studioSourceLabel(card.kind === "profile" || card.kind === "languages"
                   ? profile.freshness.source
@@ -508,19 +658,32 @@ export default function StudioClient() {
                 retained={previewIsRetained}
               />
             ))}
-            {!galleryCards.length && (
+            {previewCount === 0 && (
               <div className="empty-gallery">
-                <strong>No card previews selected</strong>
-                <span>Select an available card in Configuration to show it here and include it in Markdown.</span>
+                <strong>No previews selected</strong>
+                <span>Select an available card or scene in Configuration, then run Preview to validate it for Markdown.</span>
               </div>
             )}
+            {galleryScenes.map((id) => (
+              <StudioScenePreview
+                key={scenePreviewToken(previewConfigurationKey, id, sceneView, sceneReplay)}
+                id={id}
+                title={STUDIO_SCENE_LABELS[id]}
+                pack={previewConfiguration.pack}
+                url={buildStudioSceneUrl(id, { ...sceneRouteOptions, motion: previewConfiguration.motion })}
+                stillUrl={buildStudioSceneUrl(id, { ...sceneRouteOptions, motion: "none" })}
+                view={sceneView}
+                token={scenePreviewToken(previewConfigurationKey, id, sceneView, sceneReplay)}
+                onRendered={markSceneRendered}
+              />
+            ))}
           </div>
 
-          <div className="dashboard-heading"><div><p>Project dashboard</p><h3>{visibleBoard?.projects.length ?? activeProjects.length} declared projects</h3></div><span>Open links below</span></div>
+          <div className="dashboard-heading"><div><p>Project dashboard</p><h3>{dashboardHeading}</h3></div><span>Open links below</span></div>
           <div className="dashboard-list">
-            {(visibleBoard?.projects ?? []).map((project) => <ProjectRow key={project.repo} project={project} draft={findProjectDraft(projects, project.name)} />)}
-            {!visibleBoard && activeProjects.map((project) => <StarterProjectRow key={project.id} project={project} owner={handle.trim() || "octocat"} />)}
-            {!activeProjects.length && <div className="empty-projects"><strong>No projects selected</strong><span>Add a repository to build a project-health dashboard.</span></div>}
+            {visibleBoard ? visibleBoard.projects.map((project) => <ProjectRow key={project.repo} project={project} draft={findProjectDraft(projects, project.name)} boardMode={visibleBoard.freshness.mode} />) : null}
+            {!visibleBoard && visibleProjectDrafts.map((project) => <StarterProjectRow key={project.id} project={project} owner={handle.trim() || "octocat"} />)}
+            {!visibleProjectDrafts.length && <div className="empty-projects"><strong>No project board available</strong><span>Add repositories or run Preview again to build a project-health dashboard.</span></div>}
           </div>
 
           <div className="markdown-panel">
@@ -549,61 +712,28 @@ export default function StudioClient() {
   );
 }
 
-function StudioCardPreview({
-  card,
-  url,
-  imageUrl,
-  compactUrl,
-  login,
-  source,
-  retained,
-}: {
-  card: StudioGalleryCard;
-  url: string;
-  imageUrl: string;
-  compactUrl: string | null;
-  login: string;
-  source: string;
-  retained: boolean;
-}) {
-  const image = (
-    // Dynamic SVG endpoints already return the exact bounded vector asset; image optimisation would proxy it unnecessarily.
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      key={imageUrl}
-      src={imageUrl}
-      alt={`CommitAtlas ${card.title.toLowerCase()} preview for @${login}`}
-      loading={card.kind === "atlas" ? "eager" : "lazy"}
-    />
-  );
-  return (
-    <article className={`studio-card-preview span-${card.span} card-${card.kind}${card.compact ? " compact-card" : ""}`}>
-      <header>
-        <div><h4>{card.title}</h4><p>{card.purpose}</p></div>
-        <span className="card-source-badge">{source}</span>
-      </header>
-      <div className="card-preview-media">
-        {compactUrl ? <picture><source media="(max-width: 560px)" srcSet={compactUrl} />{image}</picture> : image}
-      </div>
-      <footer>
-        <span>{card.dimensions}{retained ? " · retained preview" : ""}</span>
-        <a href={url} target="_blank" rel="noreferrer" aria-label={`Open ${card.title} card in a new tab`}>Open card <span aria-hidden="true">↗</span></a>
-      </footer>
-    </article>
-  );
-}
-
-function ProjectRow({ project, draft }: { project: ProjectSnapshot; draft?: ProjectDraft }) {
+function ProjectRow({ project, draft, boardMode }: { project: ProjectSnapshot; draft?: ProjectDraft; boardMode: string }) {
+  const docs = describeProjectActionUrl(draft?.docs);
+  const install = describeProjectActionUrl(draft?.install);
+  const download = describeProjectActionUrl(draft?.download);
+  const ci = studioProjectCiReading({ boardMode, state: project.ci.state, label: project.ci.label });
+  // An invalid typed download stays visible instead of being masked by the release fallback.
+  const downloadHref = download.href ?? (download.raw ? null : project.release?.download?.url ?? null);
   const actions = [
-    ["Source", project.sourceUrl], ["Website", project.websiteUrl], ["Docs", safeProjectActionUrl(draft?.docs)],
-    ["Install", safeProjectActionUrl(draft?.install)], ["Download", safeProjectActionUrl(draft?.download) || project.release?.download?.url],
+    ["Source", project.sourceUrl], ["Website", project.websiteUrl], ["Docs", docs.href],
+    ["Install", install.href], ["Download", downloadHref],
     ["Release", project.release?.url], ["CI", project.ci.url],
   ].filter((item): item is [string, string] => Boolean(item[1]));
+  const invalid = [
+    { label: "Docs", presentation: docs },
+    { label: "Install", presentation: install },
+    { label: "Download", presentation: download },
+  ].filter((item) => item.presentation.error);
   return (
     <article className="dashboard-project">
-      <div className="project-title"><span className="signal-mark" data-state={project.ci.state} aria-hidden="true" /><div><h4>{project.name}</h4><p>{project.description || "No repository description supplied."}</p></div><span className="lifecycle-chip">{project.lifecycle}</span></div>
-      <dl><div><dt>CI</dt><dd className={ciTone(project.ci.state)}>{project.ci.label}</dd></div><div><dt>Release</dt><dd className={project.releaseState === "unavailable" ? "unknown" : undefined}>{releaseLabel(project)}</dd></div><div><dt>Language</dt><dd>{project.primaryLanguage || "Unavailable"}</dd></div><div><dt>Stars</dt><dd>{formatNumber(project.stars)}</dd></div></dl>
-      {actions.length > 0 && <div className="project-actions">{actions.map(([label, url]) => <a key={label} href={url} target="_blank" rel="noreferrer">{label}<span aria-hidden="true">↗</span></a>)}</div>}
+      <div className="project-title"><span className="signal-mark" data-state={ci.state} aria-hidden="true" /><div><h4>{project.name}</h4><p>{project.description || "No repository description supplied."}</p></div><span className="lifecycle-chip">{project.lifecycle}</span></div>
+      <dl><div><dt>CI</dt><dd className={ci.tone}>{ci.label}</dd></div><div><dt>Release</dt><dd className={project.releaseState === "unavailable" ? "unknown" : undefined}>{releaseLabel(project)}</dd></div><div><dt>Language</dt><dd>{project.primaryLanguage || "Unavailable"}</dd></div><div><dt>Stars</dt><dd>{formatNumber(project.stars)}</dd></div></dl>
+      {(actions.length > 0 || invalid.length > 0) && <div className="project-actions">{actions.map(([label, url]) => <a key={label} href={url} target="_blank" rel="noreferrer">{label}<span aria-hidden="true">↗</span></a>)}{invalid.map(({ label, presentation }) => <span key={label} className="project-action-invalid">{label}: {presentation.raw} <small role="alert">{presentation.error}</small></span>)}</div>}
     </article>
   );
 }
@@ -615,35 +745,23 @@ function releaseLabel(project: ProjectSnapshot): string {
 
 function StarterProjectRow({ project, owner }: { project: ProjectDraft; owner: string }) {
   const ci = starterCiPresentation(project.workflow);
-  const actions = [["Source", `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(project.repo.trim())}`], ["Docs", safeProjectActionUrl(project.docs)], ["Install", safeProjectActionUrl(project.install)], ["Download", safeProjectActionUrl(project.download)]].filter((item): item is [string, string] => Boolean(item[1]));
-  return <article className="dashboard-project synthetic"><div className="project-title"><span className="signal-mark" data-state={ci.state} aria-hidden="true" /><div><h4>{project.repo}</h4><p>Synthetic project preview — run Preview to load the API.</p></div><span className="lifecycle-chip">{project.lifecycle}</span></div><dl><div><dt>CI</dt><dd className={ci.tone}>{ci.label}</dd></div><div><dt>Release</dt><dd>Unavailable</dd></div><div><dt>Workflow</dt><dd>{ci.workflowLabel}</dd></div><div><dt>Source</dt><dd>Synthetic</dd></div></dl><div className="project-actions">{actions.map(([label, url]) => <a key={label} href={url} target="_blank" rel="noreferrer">{label}<span aria-hidden="true">↗</span></a>)}</div></article>;
-}
-
-async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
-  if (!response.ok) {
-    let message = `Request failed with ${response.status}`;
-    try {
-      const payload = await response.json() as { error?: { message?: string } };
-      if (payload.error?.message) message = payload.error.message;
-    } catch { /* The status remains the truthful fallback. */ }
-    throw new Error(message);
-  }
-  return response.json() as Promise<T>;
-}
-
-/**
- * Tone for the CI value text.
- *
- * `stale` is warn rather than muted: it is a real observation that has aged out of the freshness
- * window, which is a finding, not an absence. The two genuine absences stay untinted so they can
- * never be mistaken for a reading.
- */
-function ciTone(state: string): string {
-  if (state === "passing") return "good";
-  if (state === "pending" || state === "stale") return "warn";
-  if (state === "failing") return "bad";
-  return "unknown";
+  const docs = describeProjectActionUrl(project.docs);
+  const install = describeProjectActionUrl(project.install);
+  const download = describeProjectActionUrl(project.download);
+  const trimmedOwner = owner.trim();
+  const ownerValid = isValidStudioOwner(trimmedOwner);
+  const sourceHref = buildStudioSourceUrl(trimmedOwner, project.repo);
+  const sourceInvalid = !ownerValid && project.repo.trim()
+    ? { raw: `${trimmedOwner}/${project.repo.trim()}`, error: "Enter a valid GitHub handle before following the Source link." }
+    : null;
+  const actions = [["Source", sourceHref], ["Docs", docs.href], ["Install", install.href], ["Download", download.href]].filter((item): item is [string, string] => Boolean(item[1]));
+  const invalid = [
+    { label: "Docs", presentation: docs },
+    { label: "Install", presentation: install },
+    { label: "Download", presentation: download },
+    ...(sourceInvalid ? [{ label: "Source", presentation: { raw: sourceInvalid.raw, href: null, error: sourceInvalid.error } }] : []),
+  ].filter((item) => item.presentation.error);
+  return <article className="dashboard-project synthetic"><div className="project-title"><span className="signal-mark" data-state={ci.state} aria-hidden="true" /><div><h4>{project.repo}</h4><p>Synthetic project preview — run Preview to load the API.</p></div><span className="lifecycle-chip">{project.lifecycle}</span></div><dl><div><dt>CI</dt><dd className={ci.tone}>{ci.label}</dd></div><div><dt>Release</dt><dd>Unavailable</dd></div><div><dt>Workflow</dt><dd>{ci.workflowLabel}</dd></div><div><dt>Source</dt><dd>Synthetic</dd></div></dl><div className="project-actions">{actions.map(([label, url]) => <a key={label} href={url} target="_blank" rel="noreferrer">{label}<span aria-hidden="true">↗</span></a>)}{invalid.map(({ label, presentation }) => <span key={label} className="project-action-invalid">{label}: {presentation.raw} <small role="alert">{presentation.error}</small></span>)}</div></article>;
 }
 
 function formatNumber(value: number | null | undefined): string {

@@ -57,10 +57,10 @@ test("sitemap.xml lists every indexable page and claims nothing it cannot observ
   const body = await response.text();
   assert.match(body, /^<\?xml version="1\.0" encoding="UTF-8"\?>/);
   assert.match(body, /<urlset xmlns="http:\/\/www\.sitemaps\.org\/schemas\/sitemap\/0\.9">/);
-  for (const path of ["/", "/studio"]) {
+  for (const path of ["/", "/studio", "/gallery"]) {
     assert.ok(body.includes(`<loc>${new URL(path, ORIGIN).href}</loc>`), `sitemap is missing ${path}`);
   }
-  assert.equal((body.match(/<loc>/g) ?? []).length, 2);
+  assert.equal((body.match(/<loc>/g) ?? []).length, 3);
   for (const loc of body.match(/<loc>([^<]+)<\/loc>/g) ?? []) {
     assert.ok(loc.includes(`<loc>${ORIGIN}/`), `sitemap loc is not on the canonical origin: ${loc}`);
   }
@@ -69,6 +69,8 @@ test("sitemap.xml lists every indexable page and claims nothing it cannot observ
   assert.doesNotMatch(body, /<lastmod>|<changefreq>|<priority>/);
   // The dynamic render endpoints are not documents and must never be advertised as such.
   assert.doesNotMatch(body, /\/api\//);
+  // Scene URLs are parameterised renders, same as the card routes. They stay out of the sitemap.
+  assert.doesNotMatch(body, /\/api\/v1\/scenes\//);
 });
 
 test("no unescaped XML metacharacter can reach a sitemap location", async () => {
@@ -168,6 +170,32 @@ test("the Studio page has its own canonical URL, title, and social identity", as
   assert.doesNotMatch(html, /application\/ld\+json/);
 });
 
+test("declared social-image dimensions match the served og.png file", async () => {
+  // A wrong pair ships a cropped unfurl and rots silently: the Studio page
+  // once declared 1731x909 for a 1200x630 file.
+  const ogBytes = readFileSync(new URL("../public/og.png", import.meta.url));
+  const width = String(ogBytes.readUInt32BE(16));
+  const height = String(ogBytes.readUInt32BE(20));
+  for (const path of ["/", "/studio", "/gallery"]) {
+    const html = await (await request(path)).text();
+    const image = /<meta[^>]+property="og:image"[^>]+content="([^"]*)"/.exec(html);
+    assert.ok(image, `${path} is missing an og:image`);
+    assert.ok(image[1].endsWith("/og.png"), `${path} og:image is not the shared file: ${image[1]}`);
+    const renderedWidth = /<meta[^>]+property="og:image:width"[^>]+content="([^"]*)"/.exec(html);
+    const renderedHeight = /<meta[^>]+property="og:image:height"[^>]+content="([^"]*)"/.exec(html);
+    assert.ok(renderedWidth && renderedHeight, `${path} og:image is missing rendered dimensions`);
+    assert.equal(renderedWidth[1], width, `${path} og:image:width does not match public/og.png`);
+    assert.equal(renderedHeight[1], height, `${path} og:image:height does not match public/og.png`);
+  }
+});
+
+test("landing and studio link to the gallery", async () => {
+  for (const path of ["/", "/studio"]) {
+    const html = await (await request(path)).text();
+    assert.match(html, /href="\/gallery"/);
+  }
+});
+
 test("the not-found page is told not to index, with nothing contradicting it", async () => {
   const html = await (await request("/this-path-does-not-exist")).text();
   assert.match(html, /<meta[^>]+name="robots"[^>]+content="[^"]*noindex/);
@@ -212,7 +240,7 @@ test("a fork's configured origin reaches every canonical surface in the built Wo
   assert.match(robots, new RegExp(`^Sitemap: ${literal(forked)}/sitemap\\.xml$`, "m"));
   assert.doesNotMatch(robots, new RegExp(literal(ORIGIN)));
 
-  for (const path of ["/", "/studio"]) {
+  for (const path of ["/", "/studio", "/gallery"]) {
     assert.ok(sitemap.includes(`<loc>${new URL(path, forked).href}</loc>`), `fork sitemap is missing ${path}`);
   }
   assert.doesNotMatch(sitemap, new RegExp(literal(ORIGIN)));

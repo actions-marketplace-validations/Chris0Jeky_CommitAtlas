@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,7 @@ import {
   reducedMotionControlSelected,
   validateHostedAssetResponse,
 } from "./motion-probes/capture.mjs";
+import * as githubCapture from "./motion-probes/capture-github.mjs";
 import {
   buildGithubCapturePlan,
   captureGithub,
@@ -39,6 +41,7 @@ const evidenceDirectory = path.join(fixtureDirectory, "evidence");
 const testOutputDirectory = path.resolve(testDirectory, ".test-output");
 const testBrowser = path.resolve(testDirectory, ".test-tools", "browser.exe");
 const testPlaywrightCli = path.resolve(testDirectory, ".test-tools", "playwright", "cli.js");
+const syntheticDimensions = { naturalWidth: 360, naturalHeight: 120, renderedWidth: 360, renderedHeight: 120 };
 const sha256Pattern = /^[a-f0-9]{64}$/u;
 const readEvidence = async (name) => JSON.parse(await readFile(path.join(evidenceDirectory, name), "utf8"));
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
@@ -80,7 +83,8 @@ test("fixture index supports both image embedding paths and declares the reduced
 test("capture options accept an explicit HTTPS asset base and bounded host label", () => {
   const assetBase = "https://motion.example.test/probes/";
   const options = parseCaptureOptions([
-    "--browser", testBrowser, "--out", path.join(testOutputDirectory, "motion"),
+    "--playwright-engine", "chromium", "--playwright-cli", testPlaywrightCli,
+    "--out", path.join(testOutputDirectory, "motion"),
     "--asset-base", assetBase, "--host-label", "worker-direct",
   ]);
   assert.equal(options.assetBase, assetBase);
@@ -110,6 +114,10 @@ test("capture options reject non-bare asset bases and unbounded labels", () => {
   assert.throws(() => parseHostLabel("x".repeat(65)), /host-label/);
   assert.throws(() => parseHostLabel("worker/direct"), /host-label/);
   assert.throws(() => parseCaptureOptions(["--browser", testBrowser, "--out", path.join(testOutputDirectory, "motion"), "--asset-base"]), /asset-base/);
+  assert.throws(
+    () => parseCaptureOptions(["--browser", testBrowser, "--out", path.join(testOutputDirectory, "motion"), "--asset-base", "https://motion.example.test/probes/"]),
+    /asset-base requires --playwright-engine and --playwright-cli/,
+  );
   assert.throws(() => parseCaptureOptions(["--browser", testBrowser, "--out", path.join(testOutputDirectory, "motion"), "--host-label"]), /host-label/);
 });
 
@@ -250,6 +258,31 @@ test("direct video timing passes the Node anchor into the browser evaluation", a
   assert.match(source, /evaluate\(\(anchor\) => performance\.now\(\) - anchor, startedAt\)/u);
 });
 
+test("hosted response binding is finalized after rendered pixels are captured", async () => {
+  const source = await readFile(path.join(testDirectory, "motion-probes", "capture.mjs"), "utf8");
+  const recordedBranch = source.indexOf("if (recordVideo) {");
+  const recordedDuration = source.indexOf("const measuredVisibleDurationMs", recordedBranch);
+  const recordedFinalize = source.indexOf(
+    "if (hostedGate) browserHostedAssetObservations.push(hostedGate.assertComplete());",
+    recordedDuration,
+  );
+  const independentBranch = source.indexOf("} else for (const timeMs of frameTimes)", recordedBranch);
+  const independentScreenshot = source.indexOf(
+    "await browserPage.screenshot({ path: file });",
+    independentBranch,
+  );
+  const independentFinalize = source.indexOf(
+    "if (hostedGate) browserHostedAssetObservations.push(hostedGate.assertComplete());",
+    independentScreenshot,
+  );
+
+  assert.ok(recordedDuration > recordedBranch, "the continuous capture must retain its final timing boundary");
+  assert.ok(recordedFinalize > recordedDuration && recordedFinalize < independentBranch,
+    "the continuous response gate must be finalized only after every screenshot deadline");
+  assert.ok(independentFinalize > independentScreenshot,
+    "each independent response gate must be finalized after its screenshot is written");
+});
+
 test("recorded video metadata verifies WebM identity without claiming parsed duration", () => {
   const metadata = inspectWebmBuffer(Buffer.from("1a45dfa300010203", "hex"));
   assert.equal(metadata.magicHex, "1a45dfa3");
@@ -323,34 +356,34 @@ test("GitHub target validation distinguishes pinned raw delivery and Camo canoni
   assert.equal(resolvedRaw.canonical, rawUrl, "raw canonical must ignore the surrounding README link");
   assert.doesNotThrow(() => validateTargetMetadata(rawRow, {
     src: rawUrl, currentSrc: rawUrl, canonical: rawUrl, sources: [],
-    naturalWidth: 360, naturalHeight: 120,
+    ...syntheticDimensions,
   }));
   assert.doesNotThrow(() => validateTargetMetadata(camoRow, {
     src: "https://camo.githubusercontent.com/hash", currentSrc: "https://camo.githubusercontent.com/hash",
     canonical: "https://commit-atlas.commit-atlas.workers.dev/api/v1/probes/motion/css-enter.svg",
-    sources: [], naturalWidth: 360, naturalHeight: 120,
+    sources: [], ...syntheticDimensions,
   }));
   assert.throws(() => validateTargetMetadata(rawRow, {
     src: rawUrl, currentSrc: rawUrl.replace(githubCommit, "main"), canonical: rawUrl, sources: [],
-    naturalWidth: 360, naturalHeight: 120,
+    ...syntheticDimensions,
   }), /full raw commit pin/);
   const wrongProbeUrl = rawUrl.replace("css-enter.svg", "css-breathe.svg");
   assert.throws(() => validateTargetMetadata(rawRow, {
     src: wrongProbeUrl, currentSrc: wrongProbeUrl, canonical: wrongProbeUrl, sources: [],
-    naturalWidth: 360, naturalHeight: 120,
+    ...syntheticDimensions,
   }), /must select css-enter\.svg/);
   assert.throws(() => validateTargetMetadata(camoRow, {
     src: "https://camo.githubusercontent.com/hash", currentSrc: "https://camo.githubusercontent.com/hash",
     canonical: "https://commit-atlas.commit-atlas.workers.dev/api/v1/probes/motion/css-breathe.svg",
-    sources: [], naturalWidth: 360, naturalHeight: 120,
+    sources: [], ...syntheticDimensions,
   }), /must select css-enter\.svg/);
   assert.doesNotThrow(() => validateTargetMetadata(positiveRow, {
     src: "https://camo.githubusercontent.com/control", currentSrc: "https://camo.githubusercontent.com/control",
-    canonical: positiveControlUrl, sources: [], naturalWidth: 435, naturalHeight: 50,
+    canonical: positiveControlUrl, sources: [], naturalWidth: 435, naturalHeight: 50, renderedWidth: 435, renderedHeight: 50,
   }));
   assert.throws(() => validateTargetMetadata(positiveRow, {
     src: "https://camo.githubusercontent.com/control", currentSrc: "https://camo.githubusercontent.com/control",
-    canonical: positiveControlUrl.replace("duration=2500", "duration=5000"), sources: [], naturalWidth: 435, naturalHeight: 50,
+    canonical: positiveControlUrl.replace("duration=2500", "duration=5000"), sources: [], naturalWidth: 435, naturalHeight: 50, renderedWidth: 435, renderedHeight: 50,
   }), /exact configured/);
 
   const reducedRow = plan.find((row) => row.kind === "reduced-motion-control" && row.host === "github-raw-relative");
@@ -366,7 +399,7 @@ test("GitHub target validation distinguishes pinned raw delivery and Camo canoni
     currentSrc: reducedUrl,
     canonical: reducedUrl,
     sources: rawSources,
-    naturalWidth: 360, naturalHeight: 120,
+    ...syntheticDimensions,
   }, { currentSrc: reducedUrl }));
   assert.equal(rawSources[0].srcset, rootRelativeReduced, "validation must retain the literal root-relative source value");
 
@@ -412,6 +445,7 @@ test("completed GitHub output requires every frame, measured verdict, and record
     commit: githubCommit,
     currentSrc,
     canonical: "https://example.test/canonical",
+    expectedBodySha256: "c".repeat(64),
     requestGate: {
       targetUrl: currentSrc, interceptionCount: 1,
       loadTimestampMs: 100, loadToFirstFrameMs: 1, loadToFirstFrameCompleteMs: 2,
@@ -440,6 +474,10 @@ test("completed GitHub output requires every frame, measured verdict, and record
       durationBoundary: "measuredVisibleDurationMs is browser performance time; WebM container duration is not parsed",
     },
   }));
+  for (const [index, discovery] of discoveries.entries()) Object.assign(discovery, {
+    ...plan[index], version: "1.0", currentSrc, canonical: currentSrc,
+    expectedBodySha256: "c".repeat(64), responseObservation: rows[index].responseObservation,
+  });
   assert.doesNotThrow(() => validateCompletedReport({ selectedEngines, plan, discoveries, rows }));
   rows[0] = { ...rows[0], video: { ...rows[0].video, measuredVisibleDurationMs: 2_999 } };
   assert.throws(() => validateCompletedReport({ selectedEngines, plan, discoveries, rows }), /at least three seconds/);
@@ -651,4 +689,148 @@ test("hosted diagnostic ledger keeps WebKit explicitly outside the evidence", as
   assert.equal(ledger.failure.trackingIssue, "#180");
   assert.match(ledger.failure.message, /must decode the synthetic 360x120 fixture/u);
   assert.equal(ledger.rows.some((row) => row.engine === "webkit"), false);
+});
+
+
+test("WebKit presentation dimensions preserve positive bounded geometry independently of asset bytes", () => {
+  const [row] = buildGithubCapturePlan({ hosts: ["github-raw-relative"], probes: ["css-enter"], embeds: ["img"], includeReducedControls: false, includePositiveControl: false });
+  const url = `https://github.com/Chris0Jeky/commitatlas-motion-probes/raw/${githubCommit}/tests/fixtures/motion-probes/css-enter.svg`;
+  const metadata = { src: url, currentSrc: url, canonical: url, sources: [], naturalWidth: 400, naturalHeight: 133, renderedWidth: 400, renderedHeight: 133.328125 };
+  assert.doesNotThrow(() => validateTargetMetadata(row, metadata));
+  for (const [key, value] of [["naturalWidth", 0], ["naturalHeight", Infinity], ["renderedWidth", 0], ["renderedHeight", NaN], ["renderedWidth", 721], ["naturalWidth", 401], ["renderedHeight", 130]]) {
+    assert.throws(() => validateTargetMetadata(row, { ...metadata, [key]: value }), /dimensions|positive and bounded/);
+  }
+});
+
+test("GitHub synthetic body identity rejects a different SVG with matching presentation dimensions", () => {
+  const [row] = buildGithubCapturePlan({ hosts: ["worker-camo"], probes: ["css-enter"], embeds: ["img"], includeReducedControls: false, includePositiveControl: false });
+  const currentSrc = "https://camo.githubusercontent.com/synthetic";
+  const final = { url: currentSrc, status: 200, headersArray: [{ name: "content-type", value: "image/svg+xml" }], bodySha256: "a".repeat(64), bodyError: null };
+  assert.doesNotThrow(() => validateResponseChain(row, currentSrc, [final], "a".repeat(64)));
+  assert.throws(() => validateResponseChain(row, currentSrc, [final], "b".repeat(64)), /pinned synthetic fixture/);
+  assert.throws(() => validateResponseChain(row, currentSrc, [{ ...final, headersArray: [{ name: "content-type", value: "text/html" }] }], "a".repeat(64)), /must be SVG/);
+});
+
+test("capture clips reject replaced timed nodes and geometry outside the viewport", () => {
+  assert.equal(typeof githubCapture.validateCaptureTargetClip, "function");
+  const valid = { sameTarget: true, x: 20, y: 30, width: 400, height: 133.328125 };
+  assert.doesNotThrow(() => githubCapture.validateCaptureTargetClip("target", valid));
+  assert.throws(() => githubCapture.validateCaptureTargetClip("target", { ...valid, sameTarget: false }), /same DOM node/);
+  for (const delta of [{ x: -1 }, { y: 400 }, { width: 0 }, { height: Infinity }]) {
+    assert.throws(() => githubCapture.validateCaptureTargetClip("target", { ...valid, ...delta }), /viewport|dimensions/);
+  }
+});
+
+test("CSS-enter retains the 250 ms sample and 440 ms completion boundary", () => {
+  assert.equal(typeof githubCapture.validateFrameDeadline, "function");
+  assert.doesNotThrow(() => githubCapture.validateFrameDeadline("css-enter", 250, 440));
+  assert.throws(() => githubCapture.validateFrameDeadline("css-enter", 250, 440.1), /440 ms observation window/);
+  assert.doesNotThrow(() => githubCapture.validateFrameDeadline("css-enter", 500, 900));
+  assert.doesNotThrow(() => githubCapture.validateFrameDeadline("css-breathe", 250, 900));
+});
+
+test("row setup diagnostics retain the primary gate error when context cleanup also fails", async (t) => {
+  assert.equal(typeof githubCapture.captureRow, "function");
+  const outputDirectory = await mkdtemp(path.join(tmpdir(), "commitatlas-row-setup-"));
+  t.after(() => rm(outputDirectory, { recursive: true, force: true }));
+  const primary = new Error("gate setup failed");
+  const browser = { newContext: async () => ({
+    route: async () => { throw primary; },
+    close: async () => { throw new Error("context cleanup failed"); },
+  }) };
+  const [row] = buildGithubCapturePlan({ probes: ["css-enter"], includeReducedControls: false, includePositiveControl: false });
+  const discovery = { currentSrc: "https://example.test/probe.svg", canonical: "https://example.test/probe.svg", expectedBodySha256: "a".repeat(64) };
+  await assert.rejects(githubCapture.captureRow(browser, "webkit", "26.0", row, discovery, outputDirectory), (error) => {
+    assert.equal(error, primary);
+    assert.equal(error.captureFailure.phase, "request-gate-setup");
+    assert.equal(error.captureFailure.accepted, false);
+    assert.deepEqual(error.captureFailure.completedFrames, []);
+    assert.deepEqual(error.captureFailure.cleanupFailures, [{ phase: "context-close", failure: "context cleanup failed" }]);
+    return true;
+  });
+  const contextFailure = new Error("context creation failed");
+  await assert.rejects(githubCapture.captureRow({ newContext: async () => { throw contextFailure; } }, "webkit", "26.0", row, discovery, outputDirectory), (error) => {
+    assert.equal(error, contextFailure);
+    assert.equal(error.captureFailure.phase, "context-creation");
+    assert.deepEqual(error.captureFailure.completedFrames, []);
+    assert.deepEqual(error.captureFailure.cleanupFailures, []);
+    return true;
+  });
+});
+
+test("video finalization diagnostics retain completed frames through path, rename and inspection failures", async (t) => {
+  assert.equal(typeof githubCapture.settleCaptureRow, "function");
+  const outputDirectory = await mkdtemp(path.join(tmpdir(), "commitatlas-row-video-"));
+  t.after(() => rm(outputDirectory, { recursive: true, force: true }));
+  const row = { host: "github-raw-relative", probe: "css-enter", embed: "img", media: "no-preference", selector: 'img[alt="css-enter"]' };
+  const frames = [{ targetTimeMs: 0, actualTimeMs: 10, completedTimeMs: 20, path: "0.png", sha256: "a".repeat(64) }];
+  const base = {
+    row, engine: "webkit", browserVersion: "26.0", discovery: { currentSrc: "https://example.test/probe.svg", canonical: "https://example.test/probe.svg", expectedBodySha256: "b".repeat(64) },
+    directory: outputDirectory, outputDirectory, frames, phase: "final-identity-validation",
+    result: { frames, video: { measuredVisibleDurationMs: 5_001 } },
+  };
+  await assert.rejects(githubCapture.settleCaptureRow({ ...base, videoHandle: { path: async () => { throw new Error("video path failed"); } } }), (error) => {
+    assert.equal(error.captureFailure.phase, "video-path");
+    assert.deepEqual(error.captureFailure.completedFrames, frames);
+    assert.equal(error.captureFailure.accepted, false);
+    return true;
+  });
+  await assert.rejects(githubCapture.settleCaptureRow({ ...base, videoHandle: { path: async () => path.join(outputDirectory, "missing.webm") } }), (error) => {
+    assert.equal(error.captureFailure.phase, "video-rename");
+    assert.deepEqual(error.captureFailure.completedFrames, frames);
+    return true;
+  });
+  const invalidVideo = path.join(outputDirectory, "invalid.webm");
+  await writeFile(invalidVideo, "not WebM");
+  await assert.rejects(githubCapture.settleCaptureRow({ ...base, videoHandle: { path: async () => invalidVideo } }), (error) => {
+    assert.equal(error.captureFailure.phase, "video-inspection");
+    assert.deepEqual(error.captureFailure.completedFrames, frames);
+    assert.equal(error.captureFailure.video.path, "motion.webm");
+    return true;
+  });
+  const validVideo = path.join(outputDirectory, "valid-marker.webm");
+  await writeFile(validVideo, Buffer.from("1a45dfa300010203", "hex"));
+  const completed = await githubCapture.settleCaptureRow({ ...base, videoHandle: { path: async () => validVideo } });
+  assert.equal(completed, base.result);
+  assert.equal(completed.video.path, "motion.webm");
+  assert.equal(completed.video.magicHex, "1a45dfa3");
+  assert.equal(completed.video.actualDurationVerified, false);
+  assert.deepEqual(completed.frames, frames);
+});
+
+test("a teardown failure rejects a previously collected row without discarding its frames", async () => {
+  assert.equal(typeof githubCapture.settleCaptureRow, "function");
+  const frames = [{ targetTimeMs: 0, path: "0.png" }];
+  const primary = new Error("context close failed");
+  await assert.rejects(githubCapture.settleCaptureRow({
+    row: { selector: "target" }, engine: "webkit", browserVersion: "26.0", discovery: {},
+    context: { close: async () => { throw primary; } }, result: { frames }, frames, phase: "final-identity-validation",
+  }), (error) => {
+    assert.equal(error, primary);
+    assert.equal(error.captureFailure.phase, "context-close");
+    assert.deepEqual(error.captureFailure.completedFrames, frames);
+    assert.equal(error.captureFailure.accepted, false);
+    return true;
+  });
+});
+
+test("cleanup failures preserve a rejected frame's primary error, phase and available timing", async () => {
+  const primary = Object.assign(new Error("capture deadline failed"), { frameObservation: { targetTimeMs: 250, completedTimeMs: 447, failurePhase: "frame-deadline" } });
+  const frames = [{ targetTimeMs: 0, path: "0.png" }];
+  await assert.rejects(githubCapture.settleCaptureRow({
+    row: { selector: "target" }, engine: "webkit", browserVersion: "26.0", discovery: {},
+    gate: { release: () => { throw new Error("gate release failed"); }, count: () => 1 },
+    context: { close: async () => { throw new Error("context close failed"); } },
+    frames, phase: "timed-frames", failure: primary,
+  }), (error) => {
+    assert.equal(error, primary);
+    assert.equal(error.captureFailure.phase, "timed-frames");
+    assert.equal(error.captureFailure.failedFrame, primary.frameObservation);
+    assert.deepEqual(error.captureFailure.completedFrames, frames);
+    assert.deepEqual(error.captureFailure.cleanupFailures, [
+      { phase: "request-gate-release", failure: "gate release failed" },
+      { phase: "context-close", failure: "context close failed" },
+    ]);
+    return true;
+  });
 });

@@ -1,10 +1,9 @@
 import { ProjectLifecycleSchema, type ProjectLifecycle } from "@commit-atlas/core";
 import type { ProjectWorkflow } from "./types.js";
-import { decodeWorkflowMapComponent } from "./workflow-map.js";
+import { decodeWorkflowMapComponent, isWorkflowIdentity, MAX_WORKFLOW_CODE_POINTS } from "./workflow-map.js";
 
-const HANDLE = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i;
-const REPOSITORY = /^(?!\.\.?$)[a-z\d._-]{1,100}$/i;
-const MAX_WORKFLOW_CODE_POINTS = 200;
+const HANDLE = /^(?!.*--)[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i;
+const REPOSITORY = /^(?!\.{1,2}$)(?!.*\.\.)[a-z\d._-]{1,100}$/i;
 const MAX_PROJECTS = 6;
 const MAX_REPOSITORY_CHARACTERS = 100;
 const MAX_LIFECYCLE_CHARACTERS = 11;
@@ -16,18 +15,28 @@ export class InputError extends Error {
 }
 
 export function parseGitHubHandle(value: string | null, label = "user"): string {
-  const candidate = value?.trim() ?? "";
+  const candidate = typeof value === "string" ? value.trim() : "";
   if (!HANDLE.test(candidate)) {
     throw new InputError(`${label} must be a valid GitHub handle`);
   }
   return candidate;
 }
 
-export function parseRepositoryNames(value: string | null): string[] {
-  const values = (value ?? "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
+export function parseRepositoryNames(value: string | readonly string[] | null): string[] {
+  const entries = typeof value === "string" ? value.split(",") : value ?? [];
+  if (!Array.isArray(entries)) throw new InputError("repos must contain repository names");
+  if (entries.length > MAX_PROJECTS) throw new InputError("repos must contain between one and six repository names");
+  // Array.from visits sparse slots too: a missing identifier must not disappear into a valid list.
+  const segments = Array.from(entries, (item) => {
+    if (typeof item !== "string") throw new InputError("repos contains an invalid repository name");
+    return item.trim();
+  });
+  // A hole must not collapse into a shorter successful list. A wholly empty value still
+  // falls through to the one-to-six check below.
+  if (segments.some((item) => item.length === 0) && segments.some((item) => item.length > 0)) {
+    throw new InputError("repos contains an empty repository name");
+  }
+  const values = segments.filter((item) => item.length > 0);
 
   if (values.length === 0 || values.length > 6) {
     throw new InputError("repos must contain between one and six repository names");
@@ -49,7 +58,7 @@ export function parseLifecycleMap(
   if (!value) throw new InputError("states must declare a lifecycle for every repository");
   if (value.length > MAX_LIFECYCLE_MAP_LENGTH) throw new InputError("states is too long");
 
-  const entries = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  const entries = value.split(",").map((entry) => entry.trim());
   const result = new Map<string, ProjectLifecycle>();
   for (const entry of entries) {
     const separator = entry.lastIndexOf(":");
@@ -135,15 +144,4 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 export function stringField(record: Record<string, unknown>, key: string): string | null {
   const value = record[key];
   return typeof value === "string" ? value : null;
-}
-
-function isWorkflowIdentity(value: string): value is ProjectWorkflow {
-  return value === value.trim()
-    && [...value].length >= 1
-    && [...value].length <= MAX_WORKFLOW_CODE_POINTS
-    && !value.split(/[\\/]/).some((segment) => segment === "." || segment === "..")
-    && ![...value].some((character) => {
-      const code = character.codePointAt(0)!;
-      return code <= 0x1f || code === 0x7f;
-    });
 }

@@ -45,12 +45,13 @@ interface LastGoodEntry {
   readonly body: string;
   readonly storedAt: string;
   readonly observedAt: string;
+  readonly validatedAt?: string;
   readonly headers: Readonly<Record<string, string>>;
 }
 
 /**
  * Preserve a validated, public-only API representation across anonymous GitHub
- * quota and deadline failures. Synthetic and token-backed requests never enter
+ * upstream refusals, quota and deadline failures. Synthetic and token-backed requests never enter
  * this path, and a cold miss keeps the route's original bounded error.
  */
 export async function withPublicLastGood(
@@ -133,10 +134,13 @@ export async function publicLastGoodKey(request: Request): Promise<string> {
   return `public-last-good:v1:${hash}`;
 }
 
+const SCENE_PATH = /^\/api\/v1\/scenes\/[a-z][a-z0-9]*(?:-[a-z0-9]+)*\.svg$/u;
+
 function isEligiblePublicRequest(request: Request): boolean {
   if (request.method !== "GET") return false;
   const url = new URL(request.url);
-  return ELIGIBLE_PATHS.has(url.pathname) && url.searchParams.get("demo") !== "true";
+  const hostedScene = SCENE_PATH.test(url.pathname);
+  return (ELIGIBLE_PATHS.has(url.pathname) || hostedScene) && url.searchParams.get("demo") !== "true";
 }
 
 function isValidatedSuccess(response: Response, request: Request): boolean {
@@ -191,12 +195,15 @@ async function refreshLastGoodRetention(
   response: Response,
   now: Date,
 ): Promise<void> {
-  const raw = await store.get(key);
-  const entry = parseEntry(raw, request, now);
-  if (!entry || response.headers.get("etag") !== entry.headers.etag) return;
-  // Re-persist the validated representation only to extend KV retention. Its original storage and
-  // observation timestamps remain evidence of when the body was actually seen.
-  await store.put(key, JSON.stringify(entry), { expirationTtl: RETENTION_SECONDS });
+  const etag = response.headers.get("etag");
+  const entry = parseEntry(await store.get(key), request, now);
+  if (!entry || etag !== entry.headers.etag) return;
+  // Re-read immediately before the retention put. Persist this snapshot only when it still parses
+  // and its etag still matches. A write that lands after this read can still win.
+  const current = parseEntry(await store.get(key), request, now);
+  if (!current || etag !== current.headers.etag) return;
+  // Retention follows validation; storage and observation still describe the original body.
+  await store.put(key, JSON.stringify({ ...current, validatedAt: now.toISOString() }), { expirationTtl: RETENTION_SECONDS });
 }
 
 async function upstreamFallbackReason(response: Response): Promise<"rate-limited" | "unavailable" | null> {
@@ -204,7 +211,7 @@ async function upstreamFallbackReason(response: Response): Promise<"rate-limited
   try {
     const payload = await response.clone().json() as { error?: { code?: unknown } };
     if (payload.error?.code === "github_rate_limited") return "rate-limited";
-    if (payload.error?.code === "github_unavailable") return "unavailable";
+    if (["github_unavailable", "github_timeout", "github_auth_required", "github_forbidden"].includes(String(payload.error?.code))) return "unavailable";
   } catch {
     return null;
   }
@@ -225,8 +232,11 @@ function parseEntry(raw: string | null, request: Request, now: Date): LastGoodEn
 
   const storedAt = Date.parse(value.storedAt);
   const observedAt = Date.parse(value.observedAt);
-  const ageMs = now.getTime() - storedAt;
-  if (!Number.isFinite(storedAt) || !Number.isFinite(observedAt) || ageMs < -300_000
+  if (value.validatedAt !== undefined && typeof value.validatedAt !== "string") return null;
+  const validatedAt = value.validatedAt === undefined ? storedAt : Date.parse(value.validatedAt);
+  const ageMs = now.getTime() - validatedAt;
+  if (!Number.isFinite(storedAt) || !Number.isFinite(observedAt) || !Number.isFinite(validatedAt)
+      || validatedAt < storedAt || ageMs < -300_000
       || ageMs > RETENTION_SECONDS * 1000 || observedAt > storedAt + 300_000
       || observedAt < storedAt - RETENTION_SECONDS * 1000) return null;
 
@@ -239,6 +249,12 @@ function parseEntry(raw: string | null, request: Request, now: Date): LastGoodEn
       headers[name] = header;
     }
   }
+  try {
+    // Stored strings must also be usable HTTP header values in this runtime.
+    new Headers(headers);
+  } catch {
+    return null;
+  }
   const contentType = headers["content-type"] ?? "";
   if (isSvgPath(request) !== contentType.toLowerCase().startsWith("image/svg+xml")) return null;
   if (!isSafeBody(value.body, contentType)) return null;
@@ -249,6 +265,7 @@ function parseEntry(raw: string | null, request: Request, now: Date): LastGoodEn
     body: value.body,
     storedAt: new Date(storedAt).toISOString(),
     observedAt: new Date(observedAt).toISOString(),
+    ...(value.validatedAt === undefined ? {} : { validatedAt: new Date(validatedAt).toISOString() }),
     headers,
   };
 }
@@ -329,6 +346,17 @@ function isSafeBody(body: string, contentType: string): boolean {
   }
 }
 
+const ISO_STAMP = "(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z)";
+
+function lastIsoStamp(body: string, pattern: RegExp): string | null {
+  let found: string | null = null;
+  for (const match of body.matchAll(pattern)) {
+    const parsed = Date.parse(match[1] ?? "");
+    if (Number.isFinite(parsed)) found = new Date(parsed).toISOString();
+  }
+  return found;
+}
+
 function observationTime(body: string, contentType: string): string | null {
   if (contentType.toLowerCase().startsWith("application/json")) {
     try {
@@ -343,9 +371,15 @@ function observationTime(body: string, contentType: string): string | null {
     } catch {
       return null;
     }
+    // A public string inside the JSON body is not a renderer stamp.
+    return null;
   }
-  const match = body.match(/Generated\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z)/);
-  return match && Number.isFinite(Date.parse(match[1])) ? new Date(match[1]).toISOString() : null;
+  // The atlas footer (`Generated <time> ·`) and a desc whose whole text is that
+  // stamp are renderer output. Public biography or location text can contain the
+  // same words earlier in the body and must not become the observation time.
+  const footer = lastIsoStamp(body, new RegExp(`Generated\\s+${ISO_STAMP}\\s+·`, "g"));
+  const described = lastIsoStamp(body, new RegExp(`<desc>\\s*Generated\\s+${ISO_STAMP}\\s*</desc>`, "g"));
+  return footer ?? described;
 }
 
 function responseWithHeader(response: Response, name: string, value: string): Response {

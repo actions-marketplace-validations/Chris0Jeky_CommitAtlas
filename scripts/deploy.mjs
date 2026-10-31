@@ -17,7 +17,9 @@
  *                     (set it when the Worker answers on a custom domain)
  */
 import { spawnSync } from "node:child_process";
+import { appendFileSync } from "node:fs";
 
+import { formatDeploymentIdentity, readCheckoutSha } from "./deploy-identity.mjs";
 import { extractDeployedOrigin } from "./deployed-origin.mjs";
 
 const skipBuild = process.argv.includes("--skip-build");
@@ -45,16 +47,33 @@ function runNode(args) {
   return result;
 }
 
-function exitOnFailure(label, status) {
+// Pipes are asynchronous on POSIX. A synchronous child blocks queued writes,
+// and process.exit() discards them, so drain both streams at those boundaries.
+function flushOutput() {
+  return Promise.all([process.stdout, process.stderr].map((stream) => new Promise((resolve, reject) => {
+    stream.write("", (error) => error ? reject(error) : resolve());
+  })));
+}
+
+async function exitOnFailure(label, status) {
   if (status !== 0) {
     console.error(`\n${label} failed with exit code ${status}.`);
+    await flushOutput();
     process.exit(status ?? 1);
   }
 }
 
+// Pin the expected revision before building; workflow_run's GITHUB_SHA may name another head.
+const sha = readCheckoutSha();
+if (!sha) {
+  console.error("Deployment requires a valid commit SHA from this Git checkout.");
+  await flushOutput();
+  process.exit(1);
+}
+
 if (!skipBuild) {
   console.log("> building the Worker and its assets\n");
-  exitOnFailure("npm run build", runShell("npm run build", { stdio: "inherit" }).status);
+  await exitOnFailure("npm run build", runShell("npm run build", { stdio: "inherit" }).status);
 }
 
 console.log("\n> deploying to Cloudflare Workers\n");
@@ -63,9 +82,21 @@ console.log("\n> deploying to Cloudflare Workers\n");
 const deploy = runShell("npx wrangler deploy");
 process.stdout.write(deploy.stdout ?? "");
 process.stderr.write(deploy.stderr ?? "");
-exitOnFailure("wrangler deploy", deploy.status);
+await exitOnFailure("wrangler deploy", deploy.status);
 
-const reported = extractDeployedOrigin(`${deploy.stdout ?? ""}\n${deploy.stderr ?? ""}`);
+const output = `${deploy.stdout ?? ""}\n${deploy.stderr ?? ""}`;
+const identity = formatDeploymentIdentity(sha, output);
+console.log(`\n${identity}`);
+if (process.env.GITHUB_STEP_SUMMARY) {
+  // The deploy already succeeded: an unwritable summary is a warning, never a failed deploy.
+  try {
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n${identity}\n`);
+  } catch (error) {
+    console.warn(`Could not write the step summary: ${error.code ?? error.message}`);
+  }
+}
+
+const reported = extractDeployedOrigin(output);
 const override = process.env.DEPLOY_BASE_URL?.trim();
 const baseUrl = override || reported;
 
@@ -73,9 +104,10 @@ if (!baseUrl) {
   console.error(
     "\nDeployment succeeded, but no origin could be read from Wrangler's output, so it was NOT verified." +
       "\nRe-run the check yourself against the correct origin:" +
-      "\n  node scripts/verify-deployment.mjs https://<your-worker>.<your-subdomain>.workers.dev" +
+      `\n  node scripts/verify-deployment.mjs https://<your-worker>.<your-subdomain>.workers.dev --expected-sha ${sha}` +
       "\nor set DEPLOY_BASE_URL and re-run this script.",
   );
+  await flushOutput();
   process.exit(1);
 }
 
@@ -84,4 +116,5 @@ if (override && reported && override !== reported) {
 }
 
 console.log(`\n> verifying ${baseUrl}\n`);
-exitOnFailure("deployment verification", runNode(["scripts/verify-deployment.mjs", baseUrl]).status);
+await flushOutput();
+await exitOnFailure("deployment verification", runNode(["scripts/verify-deployment.mjs", baseUrl, "--expected-sha", sha]).status);

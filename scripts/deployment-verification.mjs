@@ -11,15 +11,37 @@ export const MAX_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
 
 const REQUEST_HEADERS = { "user-agent": "CommitAtlas-deployment-check" };
 
+class BuildIdentityError extends Error {}
+
+function validateExpectedSha(value) {
+  if (value === undefined) return undefined;
+  assert(typeof value === "string" && value.length === 40 && /^[a-f\d]+$/i.test(value),
+    "expected build SHA must be a full 40-character Git commit SHA");
+  return value.toLowerCase();
+}
+
+/** Keep URL-only status checks compatible; requesting identity always requires a valid SHA. */
+export function parseVerificationArgs(args) {
+  const [baseUrl, mode, value] = args;
+  if (baseUrl && (args.length === 1 || (args.length === 2 && mode === "--status-only"))) {
+    return { baseUrl, expectedSha: undefined };
+  }
+  if (baseUrl && args.length === 3 && mode === "--expected-sha" && value !== undefined) {
+    return { baseUrl, expectedSha: validateExpectedSha(value) };
+  }
+  throw new Error("usage: node scripts/verify-deployment.mjs <base-url> [--expected-sha <commit-sha> | --status-only]");
+}
+
 /**
  * Fetch a deployment route with one shared attempt budget.
  *
  * Transport errors are retryable for every route. A received 404 is retryable
- * only when the caller opts into the fixed motion-probe exception. Every
- * other response is returned to the route assertion immediately.
+ * only when the caller opts into the fixed motion-probe exception. The health
+ * assertion may also retry a missing or stale build identity. These failures
+ * share this loop's budget; other response/assertion failures are immediate.
  *
  * @param {URL} target
- * @param {{fetchImpl?: typeof fetch, sleep?: (milliseconds: number) => Promise<void>, report?: (message: string) => void, retryNotFound?: boolean}} [options]
+ * @param {{fetchImpl?: typeof fetch, sleep?: (milliseconds: number) => Promise<void>, report?: (message: string) => void, retryNotFound?: boolean, validateResponse?: (response: Response) => Promise<void>}} [options]
  */
 export async function fetchWithBoundedRetry(
   target,
@@ -28,6 +50,7 @@ export async function fetchWithBoundedRetry(
     sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
     report = (message) => console.log(`  RETRY ${message}`),
     retryNotFound = false,
+    validateResponse,
   } = {},
 ) {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
@@ -49,20 +72,35 @@ export async function fetchWithBoundedRetry(
       continue;
     }
 
-    if (!(retryNotFound && response.status === 404)) return response;
-    if (attempt === MAX_ATTEMPTS) {
-      throw new Error(
-        `${target.href} returned HTTP 404 after ${MAX_ATTEMPTS} attempts (motion probe propagation did not complete)`,
-      );
+    if (retryNotFound && response.status === 404) {
+      if (attempt === MAX_ATTEMPTS) {
+        throw new Error(
+          `${target.href} returned HTTP 404 after ${MAX_ATTEMPTS} attempts (motion probe propagation did not complete)`,
+        );
+      }
+      await scheduleRetry({
+        target,
+        attempt,
+        reason: "HTTP 404 for the fixed motion probe",
+        sleep,
+        report,
+      });
+      continue;
     }
 
-    await scheduleRetry({
-      target,
-      attempt,
-      reason: "HTTP 404 for the fixed motion probe",
-      sleep,
-      report,
-    });
+    // Validate in this attempt so health consumes its body only once, without a
+    // cloned stream. JSON/body-read and non-identity errors must not be retried.
+    try {
+      await validateResponse?.(response);
+    } catch (cause) {
+      if (!(cause instanceof BuildIdentityError)) throw cause;
+      if (attempt === MAX_ATTEMPTS) {
+        throw new Error(`${cause.message} after ${MAX_ATTEMPTS} attempts (health build propagation did not complete)`);
+      }
+      await scheduleRetry({ target, attempt, reason: cause.message, sleep, report });
+      continue;
+    }
+    return response;
   }
 
   throw new Error("unreachable");
@@ -74,8 +112,20 @@ async function scheduleRetry({ target, attempt, reason, sleep, report }) {
   await sleep(delay);
 }
 
+/**
+ * The pages `/sitemap.xml` must list: `INDEXABLE_PAGES` in lib/site.ts, which this plain .mjs cannot
+ * import. tests/deployment-verification.test.mjs fails if the two lists drift apart.
+ */
+export const SITEMAP_PATHS = Object.freeze(["/", "/studio", "/gallery"]);
+
+/** Undo the five predefined XML entities app/sitemap.xml/route.ts escapes. */
+function decodeXmlText(value) {
+  return value.replace(/&(amp|lt|gt|quot|apos);/g, (_, name) => ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" })[name]);
+}
+
 /** Build the ordered deployment checks for one verifier run. */
-export function createDeploymentChecks() {
+export function createDeploymentChecks({ expectedSha } = {}) {
+  expectedSha = validateExpectedSha(expectedSha);
   // Each route declares its own allowed parameters (lib/svg-routes.ts), so a
   // single shared query string would be rejected as an unknown parameter. Probe
   // every card with a query its own contract actually accepts.
@@ -100,12 +150,23 @@ export function createDeploymentChecks() {
 
   return [
     {
-      name: "health endpoint reports ok",
+      name: expectedSha ? "health endpoint reports ok with the expected build SHA" : "health endpoint reports ok",
       async run(get) {
-        const response = await get("/api/v1/health");
-        assert(response.status === 200, `expected 200, got ${response.status}`);
-        const body = await response.json();
-        assert(body.status === "ok", `expected status "ok", got ${JSON.stringify(body.status)}`);
+        await get("/api/v1/health", {
+          async validateResponse(response) {
+            assert(response.status === 200, `expected 200, got ${response.status}`);
+            const body = await response.json();
+            assert(body.status === "ok", `expected status "ok", got ${JSON.stringify(body.status)}`);
+            if (expectedSha !== undefined) {
+              if (!(typeof body.buildSha === "string" && body.buildSha.length === 40 && /^[a-f\d]+$/i.test(body.buildSha))) {
+                throw new BuildIdentityError("health response has missing or malformed build SHA");
+              }
+              if (body.buildSha.toLowerCase() !== expectedSha) {
+                throw new BuildIdentityError(`expected build SHA ${expectedSha}, got ${body.buildSha}`);
+              }
+            }
+          },
+        });
       },
     },
     {
@@ -148,7 +209,14 @@ export function createDeploymentChecks() {
         assert(/^application\/xml\b/i.test(contentType), `expected application/xml, got "${contentType}"`);
         const body = await response.text();
         const locations = [...body.matchAll(/<loc>([^<]+)<\/loc>/g)].map((match) => match[1]);
-        assert(locations.length === 2, `expected 2 sitemap entries, got ${locations.length}`);
+        const urls = locations.map((location) => new URL(decodeXmlText(location)));
+        for (const url of urls) assert(!url.search && !url.hash, `sitemap entry is not a canonical page URL: ${url.href}`);
+        const paths = urls.map((url) => url.pathname);
+        assert(new Set(paths).size === paths.length, `sitemap repeats an entry: ${paths.join(", ")}`);
+        assert(
+          paths.length === SITEMAP_PATHS.length && SITEMAP_PATHS.every((path) => paths.includes(path)),
+          `expected sitemap pages ${SITEMAP_PATHS.join(", ")}, got ${paths.join(", ")}`,
+        );
         assert(!/\/api\//.test(body), "sitemap advertises a dynamic render endpoint as a document");
         // Every entry must be absolute and on one origin, or a crawler reads the set as duplicates.
         for (const location of locations) {
@@ -237,6 +305,31 @@ export function createDeploymentChecks() {
       },
     },
     {
+      name: "synthetic /api/v1/scenes/evidence-coverage.svg renders a safe SVG",
+      async run(get) {
+        const response = await get("/api/v1/scenes/evidence-coverage.svg?user=octocat&demo=true&theme=ember&motion=subtle");
+        assert(response.status === 200, `expected 200, got ${response.status}`);
+        const contentType = response.headers.get("content-type") ?? "";
+        assert(/image\/svg\+xml/.test(contentType), `expected an SVG content type, got "${contentType}"`);
+        assertSafeSvgMarkup(await response.text());
+      },
+    },
+    ...["activity-terrain", "lifecycle-map"].map((id) => ({
+      name: `synthetic /api/v1/scenes/${id}.svg carries its current renderer receipt`,
+      async run(get) {
+        const response = await get(`/api/v1/scenes/${id}.svg?user=octocat&repos=atlas&states=atlas%3Aactive&demo=true&theme=ember`, { retryNotFound: true });
+        assert(response.status === 200, `expected 200, got ${response.status}`);
+        assert(response.headers.get("content-type") === "image/svg+xml; charset=utf-8", "expected scene SVG content type");
+        const body = await response.text();
+        assertSafeSvgMarkup(body);
+        const metadata = JSON.parse(response.headers.get("x-commitatlas-scene-metadata") ?? "null");
+        assert(metadata?.version === 1 && metadata.scene === id, "expected the matching scene receipt");
+        assert(metadata.bytes === new TextEncoder().encode(body).length, "scene byte receipt does not match its body");
+        assert(metadata.unavailable === false, "synthetic scene unexpectedly unavailable");
+        assert(metadata.animatedElements === 0 && metadata.loopingGroups === 0, "default scene must remain still");
+      },
+    })),
+    {
       name: "the fixed synthetic motion probe uses the production SVG response contract",
       async run(get) {
         const path = "/api/v1/probes/motion/css-enter.svg";
@@ -289,16 +382,16 @@ function assert(condition, message) {
 /** Run all checks against one HTTPS origin. */
 export async function verifyDeployment(
   baseUrl,
-  { fetchImpl = globalThis.fetch, sleep, report = () => {}, onPass = () => {}, onFailure = () => {} } = {},
+  { expectedSha, fetchImpl = globalThis.fetch, sleep, report = () => {}, onPass = () => {}, onFailure = () => {} } = {},
 ) {
   const base = new URL(baseUrl);
   if (base.protocol !== "https:") {
     throw new Error(`refusing to verify a non-HTTPS origin: ${base.origin}`);
   }
 
-  const get = (path, { retryNotFound = false } = {}) =>
-    fetchWithBoundedRetry(new URL(path, base), { fetchImpl, sleep, report, retryNotFound });
-  const checks = createDeploymentChecks();
+  const get = (path, { retryNotFound = false, validateResponse } = {}) =>
+    fetchWithBoundedRetry(new URL(path, base), { fetchImpl, sleep, report, retryNotFound, validateResponse });
+  const checks = createDeploymentChecks({ expectedSha });
   let failed = 0;
 
   for (const check of checks) {

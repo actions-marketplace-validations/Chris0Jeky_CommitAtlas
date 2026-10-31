@@ -14,6 +14,10 @@ Hosted last-good resilience uses one non-secret Workers KV binding.
 `vite build` writes both, plus a deploy-ready `dist/server/wrangler.json` derived from the root
 [`wrangler.jsonc`](../wrangler.jsonc). Do not hand-edit the generated file — change `wrangler.jsonc`.
 
+An offline `npm run build` emits `dist/server/wrangler.json` with
+`assets: { "directory": "../client" }` and no `assets.run_worker_first` key (the default is false),
+so matching static assets are served directly without invoking the Worker; routing is unchanged.
+
 ## One-time Cloudflare setup
 
 ```bash
@@ -40,6 +44,24 @@ differs per Cloudflare account — the maintainer's is
 `https://commit-atlas.commit-atlas.workers.dev`, and yours will not be. Nothing is hard-coded; if
 the origin cannot be read the script says so and exits non-zero rather than verifying someone
 else's site.
+
+The build embeds the checked-out commit SHA in the Worker. `/api/v1/health` exposes it as `buildSha`
+with `Cache-Control: no-store` (or `private, no-store` when a GitHub token is configured). Runtime
+bindings and `GITHUB_SHA` cannot change that compiled value. A source archive or source-only test
+without a checkout identity reports `null`; deployment requires an identifiable Git checkout.
+The resolver ignores inherited Git repository/config overrides and accepts linked worktrees.
+For manual deployments, commit source changes first: the SHA records HEAD and does not attest
+to uncommitted edits.
+
+The deploy log and, when `GITHUB_STEP_SUMMARY` is set, the Actions step summary record that checkout
+SHA and Wrangler's `Current Version ID`; an unavailable Worker version is explicitly `unknown`.
+The script drains forwarded Wrangler output and the identity receipt before starting the verifier,
+so verbose reports and a failing verification cannot discard the receipt in an asynchronous log pipe.
+The deployment probe requires the served `buildSha` to match the expected checkout SHA exactly.
+Missing, malformed, or different identity fails verification if it persists through the bounded
+health retry budget, including an older bundle deployed with `--skip-build`. This comparison runs
+after upload; it does not automatically roll back a failed verification. Use the recorded Worker
+version and the rollback procedure below.
 
 The bundle is well under the 3 MiB gzipped script limit. Confirm current Workers and KV quotas for
 your account before deploying sustained traffic; CommitAtlas does not assume a paid plan.
@@ -125,11 +147,17 @@ mode and the scheduled static snapshot never need it.
 
 ```bash
 node scripts/verify-deployment.mjs https://commit-atlas.commit-atlas.workers.dev
+# Require a particular build (replace the placeholder with the full commit SHA):
+node scripts/verify-deployment.mjs https://commit-atlas.commit-atlas.workers.dev --expected-sha "<commit-sha>"
 ```
 
-Eighteen deterministic probes:
+The URL-only invocation remains available for standalone status checks and explicitly prints that
+build identity is not verified. `--status-only` selects the same mode. `npm run deploy` always passes
+the expected SHA; a missing value after `--expected-sha`, malformed SHA, or conflicting mode is an error.
 
-- health, the landing page, and the Studio (matched on the title only `/studio` sets, so serving the
+Twenty-one deterministic probes:
+
+- health (including exact build identity when requested), the landing page, and the Studio (matched on the title only `/studio` sets, so serving the
   landing page for that route fails rather than passes);
 - all eight synthetic SVG cards, each asserted to be an SVG containing no `<script>`,
   `<foreignObject>`, `<iframe>`, inline event handler, or plaintext-`http://` reference;
@@ -142,6 +170,14 @@ Eighteen deterministic probes:
   delays (5, 10, 15, and 20 seconds); transport errors use the same five-attempt budget. Every
   other received status is validated immediately, and a fifth `404` fails explicitly;
 - `robots.txt`, `sitemap.xml`, and the landing page's structured data.
+
+In strict build-identity mode, health may briefly serve the previous release after Wrangler returns.
+Only a `200` JSON response with `status: "ok"` and a missing, malformed, or different `buildSha` is
+eligible for an identity retry. Health uses the same five-attempt budget and 5/10/15/20-second delays
+as transport retries; they do not nest or reset each other's budget. The expected SHA must match
+within those attempts. Other HTTP statuses, non-`ok` health status, invalid JSON, and body-read errors
+fail immediately. Status-only checks do not retry identity. Each probe's scheduled backoff is at
+most 50 seconds; network request duration is additional.
 
 Every probe uses synthetic mode, so a failure means the deployment is wrong — not that GitHub was
 rate-limited.

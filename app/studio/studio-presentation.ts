@@ -1,4 +1,4 @@
-import { ProjectLinksSchema } from "@/packages/core/src/index";
+import { ALLOWED_LINK_HOSTS, ProjectLinksSchema } from "@/packages/core/src/index";
 import { isStudioCardAvailable, type StudioCardAvailability } from "./studio-card-availability";
 import { STUDIO_CARD_KINDS } from "./studio-markdown";
 import type { StudioCardKind } from "./studio-urls";
@@ -16,7 +16,7 @@ const STUDIO_GALLERY_CARDS: Readonly<Record<StudioCardKind, Omit<StudioGalleryCa
   atlas: {
     title: "Developer atlas",
     purpose: "A responsive overview of contribution rhythm, activity, languages, and project health.",
-    dimensions: "860 × 380 · 480 × 570 compact",
+    dimensions: "860 × 380 · 480 × 608 compact",
     span: "full",
     compact: false,
   },
@@ -113,6 +113,49 @@ export interface StarterCiPresentation {
   workflowLabel: string;
 }
 
+export function studioCiTone(state: string): string {
+  if (state === "passing") return "good";
+  if (state === "pending" || state === "stale") return "warn";
+  if (state === "failing") return "bad";
+  return "unknown";
+}
+
+export interface StudioProjectCiReading {
+  state: string;
+  label: string;
+  tone: string;
+}
+
+/**
+ * A last-good board is marked `stale` while each row still carries the cached conclusion.
+ * That cached pass is not a current pass.
+ */
+export function studioProjectCiReading(options: {
+  boardMode: string;
+  state: string;
+  label: string;
+}): StudioProjectCiReading {
+  if (options.boardMode === "stale") {
+    return { state: "stale", label: "Stale result", tone: "warn" };
+  }
+  return { state: options.state, label: options.label, tone: studioCiTone(options.state) };
+}
+
+/**
+ * The validated project list is cleared when the board request fails. The heading must not
+ * report that clearance as a measured zero.
+ */
+export function studioDashboardProjectHeading(options: {
+  boardCount: number | null;
+  visibleDeclaredCount: number;
+  typedCount: number;
+  boardWithheld: boolean;
+}): string {
+  if (options.boardWithheld) return `${options.typedCount} declared · board unavailable`;
+  const count = options.boardCount ?? options.visibleDeclaredCount;
+  return `${count} declared projects`;
+}
+
 export function starterCiPresentation(workflow: string): StarterCiPresentation {
   const configuredWorkflow = workflow.trim();
   return configuredWorkflow
@@ -151,4 +194,49 @@ export function safeProjectActionUrl(value: string | null | undefined): string |
   const parsed = ProjectLinksSchema.safeParse({ docs: value });
   if (!parsed.success || !parsed.data.docs) return null;
   return new URL(parsed.data.docs).toString();
+}
+
+export interface ProjectActionPresentation {
+  /** Trimmed typed value ("" when the field is empty). Always kept so invalid input stays visible. */
+  raw: string;
+  /** Normalized HTTPS URL when the value passes the shared link boundary, otherwise null. */
+  href: string | null;
+  /** Inline field message when a non-empty value fails validation, otherwise null. */
+  error: string | null;
+}
+
+/**
+ * Validation message for a non-empty project action value that failed
+ * `safeProjectActionUrl`. Empty values have no message; valid values are null.
+ */
+export function projectActionUrlError(value: string): string | null {
+  const raw = value.trim();
+  if (!raw) return null;
+  if (safeProjectActionUrl(raw)) return null;
+  let parsed: URL | null = null;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return "Enter a valid HTTPS URL on an allowed host.";
+  }
+  if (parsed.protocol !== "https:") return "Use an HTTPS URL on an allowed host.";
+  if (parsed.username || parsed.password) return "Use an HTTPS URL on an allowed host.";
+  const host = parsed.hostname.toLowerCase();
+  if (!(ALLOWED_LINK_HOSTS as readonly string[]).includes(host)) {
+    return "Use an HTTPS URL on an allowed host.";
+  }
+  return "Use an HTTPS URL on an allowed host.";
+}
+
+/**
+ * Presentation for one Docs/Install/Download draft value. Valid values
+ * normalize to `href`; non-empty invalid values keep `raw` with an `error`
+ * message instead of being dropped silently; empty values stay empty.
+ */
+export function describeProjectActionUrl(value: string | null | undefined): ProjectActionPresentation {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return { raw: "", href: null, error: null };
+  const href = safeProjectActionUrl(raw);
+  if (href) return { raw, href, error: null };
+  return { raw, href: null, error: projectActionUrlError(raw) };
 }

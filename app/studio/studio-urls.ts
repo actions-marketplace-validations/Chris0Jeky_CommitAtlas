@@ -1,4 +1,7 @@
-import { encodeWorkflowMapComponent } from "@/lib/github/workflow-map";
+import { encodeWorkflowMapComponent, isWorkflowIdentity } from "@/lib/github/workflow-map";
+
+/** One evidence window for collection, preview configuration, card URLs, and README output. */
+export const STUDIO_PREVIEW_DAYS = 365;
 
 export type StudioCardKind =
   | "atlas"
@@ -11,10 +14,45 @@ export type StudioCardKind =
   | "projects";
 export type StudioProjectSurface = "json" | "svg";
 
+import type { HostedMotionProfile, ScenePack } from "@/packages/svg/src/index";
+
 export interface StudioProjectInput {
   repo: string;
   lifecycle: string;
   workflow?: string;
+}
+
+/** Closed pack enum the hosted scene route accepts. Survey is the canonical default. */
+export const STUDIO_SCENE_PACKS = ["survey", "orbital", "spectral", "terminal"] as const;
+
+/** The public allowlist is shared without importing renderers into the browser. */
+export { HOSTED_SCENE_IDS as STUDIO_SCENE_IDS, HOSTED_SCENE_LABELS as STUDIO_SCENE_LABELS,
+  HOSTED_SCENE_PACKS as STUDIO_SCENE_SUPPORTED_PACKS } from "@/lib/hosted-scene-catalog";
+import { HOSTED_SCENE_IDS as STUDIO_SCENE_IDS } from "@/lib/hosted-scene-catalog";
+
+/** GitHub handle rule shared with the Studio preview gate. */
+export const STUDIO_HANDLE_PATTERN = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i;
+
+export function isValidStudioOwner(owner: string): boolean {
+  return STUDIO_HANDLE_PATTERN.test(owner.trim());
+}
+
+/**
+ * Workflow form input: blank (after trim) means "not configured" and is sent as nothing;
+ * anything else must satisfy the same identity rule the projects API enforces.
+ */
+export function isValidStudioWorkflowInput(workflow: string): boolean {
+  const trimmed = workflow.trim();
+  return trimmed === "" || isWorkflowIdentity(trimmed);
+}
+
+/** Pre-preview Source destination. Null when the owner handle is invalid. */
+export function buildStudioSourceUrl(owner: string, repo: string): string | null {
+  const login = owner.trim();
+  const name = repo.trim();
+  if (!login || !name) return null;
+  if (!isValidStudioOwner(login)) return null;
+  return `https://github.com/${login}/${encodeURIComponent(name)}`;
 }
 
 export interface StudioRouteOptions {
@@ -22,23 +60,42 @@ export interface StudioRouteOptions {
   theme: string;
   demo: boolean;
   days?: number;
-  motion?: "none" | "subtle";
+  motion?: HostedMotionProfile;
   layout?: "wide" | "compact";
   projects?: StudioProjectInput[];
+  pack?: ScenePack;
+  scenes?: readonly string[];
+}
+
+const STUDIO_QUERY_CARDS: readonly StudioCardKind[] = [
+  "atlas", "profile", "streak", "breakdown", "rhythm", "activity", "languages", "projects",
+];
+
+/** Apply a gallery link only for cards and scenes the Studio checkboxes can select. */
+export function studioSelectionFromQuery(search: string): { card: StudioCardKind | null; scene: string | null } {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const card = params.get("card");
+  const scene = params.get("scene");
+  return {
+    card: card !== null && (STUDIO_QUERY_CARDS as readonly string[]).includes(card) ? card as StudioCardKind : null,
+    scene: scene !== null && (STUDIO_SCENE_IDS as readonly string[]).includes(scene) ? scene : null,
+  };
 }
 
 export function buildStudioConfigurationKey(options: StudioRouteOptions): string {
   return JSON.stringify({
-    owner: options.owner.trim().toLowerCase(),
+    owner: options.owner.trim(),
     theme: options.theme,
     demo: options.demo,
     days: options.days ?? null,
     motion: options.motion ?? "subtle",
     layout: options.layout ?? "wide",
+    pack: options.pack ?? "survey",
+    scenes: [...(options.scenes ?? [])].sort(),
     projects: (options.projects ?? [])
       .filter((project) => project.repo.trim())
       .map((project) => ({
-        repo: project.repo.trim().toLowerCase(),
+        repo: project.repo.trim(),
         lifecycle: project.lifecycle,
         workflow: project.workflow?.trim() ?? "",
       })),
@@ -90,15 +147,17 @@ export function buildStudioRouteUrl(
   projectSurface: StudioProjectSurface = "svg",
 ): string {
   const query = new URLSearchParams();
+  const owner = options.owner.trim();
   const projects = options.projects ?? [];
 
   if (kind === "projects" || kind === "atlas") {
-    query.set(kind === "projects" ? "owner" : "user", options.owner);
-    if (kind === "projects" || projects.length > 0) {
-      query.set("repos", projects.map((project) => project.repo.trim()).join(","));
-      query.set("states", projects.map((project) => `${project.repo.trim()}:${project.lifecycle}`).join(","));
+    query.set(kind === "projects" ? "owner" : "user", owner);
+    const named = projects.filter((project) => project.repo.trim());
+    if (kind === "projects" || named.length > 0) {
+      query.set("repos", named.map((project) => project.repo.trim()).join(","));
+      query.set("states", named.map((project) => `${project.repo.trim()}:${project.lifecycle}`).join(","));
     }
-    const workflows = projects
+    const workflows = named
       .map((project) => {
         const repo = project.repo.trim();
         const workflow = project.workflow?.trim() ?? "";
@@ -107,7 +166,7 @@ export function buildStudioRouteUrl(
       .filter((workflow): workflow is string => Boolean(workflow));
     if (workflows.length > 0) query.set("workflows", workflows.join(","));
   } else {
-    query.set("user", options.owner);
+    query.set("user", owner);
   }
 
   query.set("demo", String(options.demo));
@@ -117,7 +176,7 @@ export function buildStudioRouteUrl(
     query.set("motion", options.motion ?? "subtle");
     query.set("layout", options.layout ?? "wide");
   }
-  if ((kind === "activity" || kind === "breakdown" || kind === "rhythm") && options.days !== undefined) {
+  if ((kind === "streak" || kind === "activity" || kind === "breakdown" || kind === "rhythm") && options.days !== undefined) {
     query.set("days", String(options.days));
   }
   if (kind !== "atlas" && (kind !== "projects" || projectSurface === "svg")) {
@@ -128,4 +187,34 @@ export function buildStudioRouteUrl(
     ? projectSurface === "json" ? "/api/v1/projects" : "/api/v1/projects.svg"
     : cardPaths[kind];
   return `${path}?${query.toString()}`;
+}
+
+/** Canonical scene URL. Defaults the route omits stay omitted so the preview does not redirect. */
+export function buildStudioSceneUrl(id: string, options: StudioRouteOptions): string {
+  if (!(STUDIO_SCENE_IDS as readonly string[]).includes(id)) throw new Error(`unknown studio scene: ${id}`);
+  const query = new URLSearchParams();
+  const owner = options.owner.trim();
+  const projects = (options.projects ?? [])
+    .map((project) => ({
+      repo: project.repo.trim(),
+      lifecycle: project.lifecycle,
+      workflow: project.workflow?.trim() ?? "",
+    }))
+    .filter((project) => project.repo);
+  query.set("user", owner);
+  if (projects.length > 0) {
+    query.set("repos", projects.map((project) => project.repo).join(","));
+    query.set("states", projects.map((project) => `${project.repo}:${project.lifecycle}`).join(","));
+    const workflows = projects
+      .filter((project) => project.workflow)
+      .map((project) => `${project.repo}:${encodeWorkflowMapComponent(project.workflow)}`);
+    if (workflows.length > 0) query.set("workflows", workflows.join(","));
+  }
+  query.set("demo", String(options.demo));
+  if (options.theme !== "aurora") query.set("theme", options.theme);
+  if (options.days !== undefined && options.days !== 365) query.set("days", String(options.days));
+  if ((options.motion ?? "none") !== "none") query.set("motion", options.motion ?? "none");
+  if ((options.layout ?? "wide") !== "wide") query.set("layout", options.layout ?? "wide");
+  if ((options.pack ?? "survey") !== "survey") query.set("pack", options.pack ?? "survey");
+  return `/api/v1/scenes/${id}.svg?${query.toString()}`;
 }

@@ -22,11 +22,48 @@ test("accepts bounded GitHub identifiers", () => {
   ]);
 });
 
+test("validates repository arrays without interpreting commas as separators", () => {
+  assert.deepEqual(parseRepositoryNames([" Alpha.git ", "beta_repo"]), ["Alpha.git", "beta_repo"]);
+  for (const repositories of [["alpha,beta"], ["alpha", ""], ["alpha", "ALPHA"], [" "]]) {
+    assert.throws(() => parseRepositoryNames(repositories), InputError);
+  }
+});
+
+test("rejects sparse repository arrays and non-list runtime values", () => {
+  const sparse = new Array<string>(3);
+  sparse[0] = "atlas";
+  sparse[2] = "beta";
+  for (const value of [sparse, {}, { length: 0 }, 42]) {
+    assert.throws(() => parseRepositoryNames(value as string[]), InputError);
+  }
+});
+
 test("rejects ambiguous and unbounded identifiers", () => {
   assert.throws(() => parseGitHubHandle("-owner"), InputError);
+  assert.throws(() => parseRepositoryNames("alpha,,beta"), /empty repository name/);
+  assert.throws(() => parseRepositoryNames("alpha, ,beta"), /empty repository name/);
+  assert.throws(() => parseRepositoryNames("alpha,"), /empty repository name/);
   assert.throws(() => parseRepositoryNames("alpha,ALPHA"), /duplicates/);
   assert.throws(() => parseRepositoryNames("a,b,c,d,e,f,g"), /one and six/);
   assert.throws(() => parseRepositoryNames("../secret"), /invalid/);
+});
+
+test("rejects consecutive-hyphen handles at boundary", () => {
+  assert.throws(
+    () => parseGitHubHandle("a--b"),
+    (error: unknown) => error instanceof InputError && error.code === "invalid_input",
+  );
+});
+
+test("rejects dot-only and double-dot repository names", () => {
+  assert.throws(() => parseRepositoryNames("a..b"), /invalid/);
+  assert.throws(() => parseRepositoryNames("."), /invalid/);
+  assert.throws(() => parseRepositoryNames(".."), /invalid/);
+  assert.deepEqual(parseRepositoryNames("alpha, beta.repo, gamma_repo"), [
+    "alpha",
+    "beta.repo",
+    "gamma_repo",
+  ]);
 });
 
 test("requires an explicit core lifecycle for every requested repository", () => {
@@ -59,6 +96,16 @@ test("aligns optional workflow identities to the requested repository subset", (
   }
 });
 
+test("rejects C0 and C1 controls in workflow identities", () => {
+  const c1 = String.fromCharCode(0x80);
+  const del = String.fromCharCode(0x7f);
+  const lastC1 = String.fromCharCode(0x9f);
+  assert.throws(() => parseWorkflowMap(`myrepo:work${c1}flow`, ["myrepo"]), InputError);
+  assert.throws(() => parseWorkflowMap(`myrepo:work${del}flow`, ["myrepo"]), InputError);
+  assert.throws(() => parseWorkflowMap(`myrepo:work${lastC1}flow`, ["myrepo"]), InputError);
+  assert.equal(parseWorkflowMap("myrepo:ci.yml", ["myrepo"]).get("myrepo"), "ci.yml");
+});
+
 test("round-trips workflow map delimiters and literal escape-looking text", () => {
   const workflow = "ci,release:nightly.yml";
   assert.equal(
@@ -84,4 +131,20 @@ test("permits only bounded HTTPS links", () => {
   assert.equal(safeHttpsUrl("http://example.com"), null);
   assert.equal(safeHttpsUrl("javascript:alert(1)"), null);
   assert.equal(safeHttpsUrl("https://token@example.com/docs"), null);
+});
+
+test("rejects empty lifecycle entries instead of silently repairing malformed CSV", () => {
+  for (const states of [
+    ",alpha:active,beta:maintenance",
+    "alpha:active,beta:maintenance,",
+    "alpha:active,,beta:maintenance",
+    "alpha:active, \t ,beta:maintenance",
+    "alpha:active,beta:maintenance,\n",
+  ]) {
+    assert.throws(() => parseLifecycleMap(states, ["alpha", "beta"]),
+      (error: unknown) => error instanceof InputError && error.message === "states must use repo:lifecycle entries",
+      JSON.stringify(states));
+  }
+  assert.deepEqual([...parseLifecycleMap(" Alpha:active , beta:maintenance ", ["alpha", "beta"])],
+    [["alpha", "active"], ["beta", "maintenance"]]);
 });

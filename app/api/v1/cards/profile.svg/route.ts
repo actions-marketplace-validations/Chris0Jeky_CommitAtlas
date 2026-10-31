@@ -1,10 +1,11 @@
+import { cardSvgResponse } from "@/lib/card-response";
 import { demoProfile } from "@/lib/github/demo";
 import { GitHubClient } from "@/lib/github/client";
 import { parseSvgProfileQuery } from "@/lib/svg-routes";
 import { toProfileCard } from "@/lib/svg-adapters";
-import { apiErrorResponse, canonicalSvgRedirect, optionsResponse, svgResponse } from "@/lib/http";
+import { apiErrorResponse, canonicalSvgRedirect, optionsResponse } from "@/lib/http";
 import { getGitHubToken } from "@/lib/runtime-env";
-import { renderProfileCard } from "@/packages/svg/src/index";
+import { motionRenderMetadata, renderProfileCard } from "@/packages/svg/src/index";
 
 export const dynamic = "force-dynamic";
 
@@ -23,10 +24,10 @@ export async function GET(request: Request): Promise<Response> {
       motion: query.motion,
       title: `${snapshot.login} profile`,
       description: snapshot.repositoriesTruncated
-        ? `Public GitHub profile summary for ${snapshot.login}. Aggregate star totals are unavailable because the repository list is partial.`
+        ? "Aggregate star totals are unavailable because the repository list is partial."
         : `Public GitHub profile summary for ${snapshot.login}.`,
     });
-    return svgResponse(request, body, { edgeSeconds: 900, publicData, inlineStyles: query.motion === "subtle" });
+    return await cardSvgResponse(request, body, { edgeSeconds: 900, publicData, inlineStyles: motionRenderMetadata(query.motion).inlineStyles }, "profile", snapshot.freshness.mode);
   } catch (error) {
     return apiErrorResponse(error);
   }

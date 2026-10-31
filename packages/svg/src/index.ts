@@ -6,8 +6,41 @@
  */
 
 export { canonicalJson, seededRandom, stableHash } from "./seed.js";
+export { createIdentityConfig } from "./identity.js";
+export {
+  registerScene, getScene, listScenes, renderScene, renderSceneDefinition, sceneUnavailable,
+  compileSceneMotion, sceneElementId, sceneClassName, createPublicDemoLensContext, createLensProjectionContext, sceneLensDescription,
+} from "./scene.js";
+export type {
+  SceneInputs, RenderContext, SceneDefinition, SceneUnavailable, ScenePack, BudgetClass,
+  SceneRenderResult, PublicLensProjection, PublicDemoLensContext, SceneLensProjection, PublicDemoCoverage, ResearchFindingProjection, IdentityConfig,
+} from "./scene.js";
+export { MotionPlan } from "./motion/compiler.js";
+export { MOTION_PRIMITIVES } from "./motion/types.js";
+export type { MotionApplication, MotionParameterMap, MotionPlanOptions, MotionBinding, CompiledMotionPlan } from "./motion/types.js";
+export {
+  MOTION_BACKEND_DEFAULTS, MOTION_DEFAULTS_PROVISIONAL, MOTION_BUDGETS, MOTION_BUDGETS_PROVISIONAL,
+  INSTRUMENT_MOTION_BUDGET, MAP_MOTION_BUDGET, SCENE_MOTION_BUDGET, MOTION_BUDGET_CLASS,
+  README_MOTION_INTERVAL_MS, ENTRANCE_MIN_DELAY_MS, SUBTLE_MAX_DURATION_MS, MOTION_TIMINGS,
+} from "./motion/profile.js";
+export type { MotionProfile, MotionBackend, MotionTarget, MotionFamily, MotionBudgetClass } from "./motion/profile.js";
+import type { MotionProfile, MotionBackend } from "./motion/profile.js";
+import { parseSceneXml } from "./scene-svg.js";
+import { stableHash } from "./seed.js";
+import { densityMotion, measureDensityMotion } from "./density-motion.js";
+import { CONTRIBUTION_DENSITY_BANDS, CONTRIBUTION_DENSITY_DESCRIPTION, contributionDensity, contributionFill, contributionShape, renderContributionCells } from "./density.js";
 
 export type ThemeName = "aurora" | "midnight" | "paper" | "ember";
+export type HostedMotionProfile = Exclude<MotionProfile, "cinematic">;
+
+export interface MotionRenderMetadata {
+  readonly inlineStyles: boolean;
+}
+
+export function motionRenderMetadata(motion: MotionProfile | undefined, renderedSvg?: string): MotionRenderMetadata {
+  if (renderedSvg !== undefined) return { inlineStyles: parseSceneXml(renderedSvg).nodes.some(node => node.name === "style") };
+  return { inlineStyles: motion !== undefined && motion !== "none" };
+}
 
 export interface SvgTheme {
   readonly background: string;
@@ -22,7 +55,8 @@ export interface SvgTheme {
   /** Chassis chrome: mono labels, section numerals, rules. */
   readonly chrome: string;
   /**
-   * The density ramp: ONE hue at four ascending steps, level 1 through level 4.
+   * The legacy scene density ramp: one hue at four ascending steps.
+   * Atlas/Activity use the separate absolute daily count bands in density.ts.
    *
    * Never four different hues. Hue carries no order — nothing about orange, green and yellow
    * says "more" — and the previous ramp additionally borrowed `accent`, `positive` and `warning`,
@@ -107,13 +141,20 @@ export interface RenderOptions {
   readonly height?: number;
   readonly title?: string;
   readonly description?: string;
-  readonly motion?: "none" | "subtle";
+  readonly motion?: MotionProfile;
+  /** Atlas/activity ambient backend; GitHub README output defaults to bounded SMIL. */
+  readonly motionBackend?: MotionBackend;
+  /** Distinguish identical inline Atlas/activity instances; default is a deterministic model hash. */
+  readonly instanceNamespace?: string;
 }
 
-export type CardSource = "public-github" | "public-profile" | "synthetic-demo";
+export type CardSource = "public-github" | "public-profile" | "synthetic-demo" | "public-pulse";
+export type CardDataState = "partial" | "stale" | "unavailable";
 
 export interface SourceLabelledCardData {
   readonly source?: CardSource;
+  /** Degraded observation state, kept separate from source provenance. */
+  readonly dataState?: CardDataState;
 }
 
 export interface ProfileCardData extends SourceLabelledCardData {
@@ -148,7 +189,7 @@ export interface StreakCardData extends SourceLabelledCardData {
 export interface ActivityDay {
   readonly date: string;
   readonly count: number;
-  /** Upstream GitHub intensity, when available. Falls back to a local scale for direct callers. */
+  /** Upstream intensity retained for compatibility; daily contribution bands use the exact count. */
   readonly level?: number;
 }
 
@@ -251,6 +292,116 @@ export interface ReleasesCardData extends SourceLabelledCardData {
   readonly projectsUnavailable?: number;
 }
 
+export interface DeliveryCardWindow {
+  readonly days: number;
+  readonly from: string;
+  readonly to: string;
+  readonly opened: number;
+  readonly merged: number;
+  readonly mergedPerWeek: number;
+}
+
+export interface DeliveryCardRepository {
+  readonly repository: string;
+  readonly opened30: number;
+}
+
+export interface DeliveryCardBenchmark {
+  readonly version: 1;
+  readonly id: string;
+  readonly label: string;
+  readonly publisher: string;
+  readonly metric: string;
+  readonly value: number;
+  readonly unit: string;
+  readonly sourceUrl: string;
+  readonly publishedAt: string;
+  readonly population: string;
+  readonly cohort: string;
+  readonly caveats: readonly string[];
+}
+
+/**
+ * Structural delivery-evidence input for the delivery card.
+ *
+ * This mirrors the `@commit-atlas/github` DeliverySnapshot contract without importing it:
+ * this package takes no runtime dependencies, and every other card input is likewise a
+ * package-local structural type its adapter maps into. A validated DeliverySnapshot is
+ * assignable directly; unknown, missing, or stale signals render as unknown, never healthy.
+ */
+export interface DeliveryCardData {
+  readonly version: 1;
+  readonly login: string;
+  readonly scope: {
+    readonly kind: string;
+    readonly repositories: readonly string[];
+  };
+  readonly asOf: string;
+  readonly generatedAt: string;
+  readonly source: {
+    readonly provider: string;
+    readonly metric: string;
+    readonly queryCount: number;
+  };
+  readonly lifetime: {
+    readonly authored: number;
+    readonly merged: number;
+    readonly closed: number;
+    readonly closedWithoutMerge: number;
+    readonly open: number;
+    readonly drafts: number;
+  };
+  readonly windows: readonly DeliveryCardWindow[];
+  readonly repositories: readonly DeliveryCardRepository[];
+  readonly derived: {
+    readonly resolvedMergeConversion: number | null;
+    readonly integrationBalance30: number | null;
+    readonly wipMergeWeeks: number | null;
+    readonly topTwoConcentration30: number | null;
+    readonly topSixConcentration30: number | null;
+    readonly benchmarkMultiple7: number | null;
+  };
+  readonly benchmark: DeliveryCardBenchmark | null;
+  readonly formulas: Readonly<Record<string, string>>;
+  readonly limitations: readonly string[];
+}
+
+export type PulseProbeState = "up" | "down" | "unknown" | "stale";
+
+export interface PulseProjectRow {
+  /** Producer project id (`/^[a-z0-9-]{1,64}$/`); always printed so a row is never anonymous. */
+  readonly id: string;
+  /** Catalogue display name from the operator mapping; null renders as an unmapped project. */
+  readonly displayName: string | null;
+  readonly state: PulseProbeState;
+  /** ISO 8601 UTC check timestamp; anything else renders as an unavailable check time. */
+  readonly checkedAt: string;
+  readonly sampledGood: number;
+  readonly sampledTotal: number;
+}
+
+/** Rendering time is supplied explicitly so this dependency-free renderer stays deterministic. */
+export interface PulseRenderOptions extends RenderOptions {
+  readonly nowMs: number;
+}
+
+export interface PulseCardData extends SourceLabelledCardData {
+  /**
+   * Expiry is enforced at this boundary, not just at parse time: "expired" renders an expired
+   * panel instead of probe data, so a stale capsule can never read as live.
+   */
+  readonly status: "live" | "expired";
+  /** ISO 8601 UTC timestamps bounding the capsule. */
+  readonly generatedAt: string;
+  readonly expiresAt: string;
+  /** Observed window as ISO calendar dates; anything else renders as unavailable. */
+  readonly windowStart: string;
+  readonly windowEnd: string;
+  readonly projects: readonly PulseProjectRow[];
+  /** Selected projects with no catalogue mapping; listed as unmapped, never dropped. */
+  readonly unmappedCount?: number;
+}
+
 export interface AtlasCardData {
   readonly profile: {
     readonly name: string;
@@ -301,6 +452,8 @@ export interface AtlasCardData {
   };
   readonly generatedAt: string;
   readonly source: CardSource;
+  /** Degraded observation state, kept separate from source provenance. */
+  readonly dataState?: CardDataState;
 }
 
 const DEFAULT_OPTIONS: Required<Pick<RenderOptions, "theme" | "width" | "height">> = {
@@ -312,7 +465,8 @@ const MAX_WIDTH = 1_200;
 const MAX_TITLE_LENGTH = 96;
 const MAX_DESCRIPTION_LENGTH = 180;
 const MAX_ACTIVITY_PERIOD_LENGTH = 32;
-const MAX_ACTIVITY_DAYS = 366;
+const MAX_ACTIVITY_DAYS = 731;
+const MAX_DISPLAY_CALENDAR_DAYS = 365;
 /**
  * Window boundary labels are ISO calendar dates (`YYYY-MM-DD`, 10 characters). The cap leaves
  * headroom for other bounded date spellings while stopping a direct caller from pushing an
@@ -464,6 +618,59 @@ function calendarGrid(days: readonly ActivityDay[]): { readonly cells: readonly 
   return { cells, columns: Math.max(1, (cells.at(-1)?.column ?? 0) + 1) };
 }
 
+/** Visual dates are independent of the full observation window used for streaks and totals. */
+function displayCalendarDays(input: readonly ActivityDay[]): readonly ActivityDay[] {
+  const seen = new Set<string>();
+  const days = input.filter(day => isValidIsoDate(day.date)).sort((left, right) => left.date.localeCompare(right.date)).filter(day => {
+    if (seen.has(day.date)) return false;
+    seen.add(day.date);
+    return true;
+  });
+  const latest = days.at(-1);
+  if (!latest) return [];
+  const cutoff = Date.parse(`${latest.date}T00:00:00Z`) - (MAX_DISPLAY_CALENDAR_DAYS - 1) * 86_400_000;
+  return days.filter(day => Date.parse(`${day.date}T00:00:00Z`) >= cutoff);
+}
+
+function calendarReading(days: readonly ActivityDay[]) {
+  const known = days.filter(day => Number.isSafeInteger(day.count) && day.count >= 0);
+  const complete = known.length > 0 && known.length === days.length;
+  const sum = known.reduce((total, day) => total + day.count, 0);
+  const total = complete && Number.isSafeInteger(sum) ? sum : null;
+  const active = complete ? known.filter(day => day.count > 0).length : null;
+  const peak = complete ? known.reduce((highest, day) => day.count > highest.count ? day : highest, known[0]!) : null;
+  const monthCounts = new Map<string, string[]>();
+  for (const day of days) {
+    const month = day.date.slice(0, 7);
+    const values = monthCounts.get(month) ?? [];
+    values.push(`${day.date.slice(8)}=${Number.isSafeInteger(day.count) && day.count >= 0 ? day.count : "unavailable"}`);
+    monthCounts.set(month, values);
+  }
+  return {
+    from: days[0]?.date ?? "unavailable", to: days.at(-1)?.date ?? "unavailable",
+    observed: known.length, total, active, peak,
+    density: active === null ? null : active / days.length * 100,
+    average: total === null ? null : total / days.length,
+    description: days.map(day => `${day.date} ${Number.isSafeInteger(day.count) && day.count >= 0 ? formatNumber(day.count, false) : "unavailable"}`).join("; "),
+    compactDescription: [...monthCounts.entries()].map(([month, values]) => `${month}: ${values.join(", ")}`).join("; "),
+  };
+}
+
+function calendarNamespace(kind: "atlas" | "activity", days: readonly ActivityDay[], width: number, theme: SvgTheme, options?: RenderOptions): string {
+  return options?.instanceNamespace ?? `card${stableHash(JSON.stringify([kind, width, theme.background, days.map(day => [day.date, day.count])])).slice(0, 12)}`;
+}
+
+function densityCardMotionEnabled(data: SourceLabelledCardData, days: readonly ActivityDay[]): boolean {
+  return data.dataState !== "stale" && data.dataState !== "unavailable" && days.some(day => Number.isSafeInteger(day.count) && day.count > 0);
+}
+
+/** Inherit the unchanged mono font once to keep a year of shapes and exact readings under 30KB. */
+function finishDensityCard(output: string, motion: ReturnType<typeof densityMotion>): string {
+  const result = output.replaceAll(` font-family="${MONO}"`, "").replaceAll(' font-weight="500"', "").replaceAll(' text-anchor="start"', "").replace(' fill="none">', ` fill="none" font-family="${MONO}" font-weight="500">`);
+  motion.plan.compile({ baseBytes: new TextEncoder().encode(result).length - motion.compiled.counters.bytesAdded });
+  return result;
+}
+
 function svgStart(
   width: number,
   height: number,
@@ -483,7 +690,7 @@ function svgEnd(): string { return "</svg>"; }
  * Type stacks.
  *
  * System faces only, and not by preference. These cards render as SVG inside an `<img>` on
- * GitHub, where no webfont can load and an embedded `@font-face` would spend the entire 30 KiB
+ * GitHub, where no webfont can load and an embedded `@font-face` would spend the entire 30,000 UTF-8-byte
  * budget before any data was drawn. Geist is the chassis face on the web surface; here the design
  * has to survive substitution on whatever machine renders it, so it is drawn at the stack that
  * actually paints. `Inter` is deliberately absent — it is almost never installed, so naming it
@@ -538,33 +745,20 @@ function plate(width: number, height: number, theme: SvgTheme, cut = 22): string
   for (let y = -8; y < height; y += 11) {
     bars.push(`M0 ${y}l4 0l-4 11l0 -11Z`);
   }
-  out += `<g aria-hidden="true" opacity="0.18">${bars.map((b) => `<path d="${b}" fill="${theme.chrome}"/>`).join("")}</g>`;
+  out += `<g aria-hidden="true" opacity="0.18"><path d="${bars.join("")}" fill="${theme.chrome}"/></g>`;
   return out;
 }
 
-/**
- * Map a contribution level to a fill. The ONLY place in this module that decision is made.
- *
- * Level 0 is the neutral socket, never the faintest step of the ramp. A non-finite or negative
- * level also resolves to the socket rather than indexing past the end — an unreadable signal must
- * never render as the strongest reading, which is the inversion this product exists to refuse.
- */
-function densityFill(level: number, theme: SvgTheme): string {
-  if (!Number.isFinite(level)) return theme.socket;
-  const step = Math.trunc(level);
-  if (step <= 0) return theme.socket;
-  return theme.density[Math.min(3, step - 1)]!;
-}
-
-/** The Less…More key every density surface prints, so the ramp is self-describing. */
-function densityKey(x: number, y: number, theme: SvgTheme, size = 8, labelSize = size >= 8 ? 10 : 8): string {
-  let out = mono(x, y + size, "LESS", labelSize, theme.muted, 500, "end");
-  const swatches = [theme.socket, ...theme.density];
-  swatches.forEach((fill, index) => {
-    out += `<rect x="${x + 6 + index * (size + 3)}" y="${y}" width="${size}" height="${size}" fill="${fill}"/>`;
-  });
-  out += mono(x + 12 + swatches.length * (size + 3), y + size, "MORE", labelSize, theme.muted);
-  return out;
+/** Numeric ranges and silhouettes explain the three hues without relying on colour alone. */
+function densityKey(x: number, y: number, width: number, theme: SvgTheme, labelSize = 8): string {
+  const readings = [contributionDensity(0, "2026-01-01"), ...CONTRIBUTION_DENSITY_BANDS.map(band => contributionDensity(band.max, "2026-01-01")), { band: "special", step: 0, glyph: "spark" }] as const;
+  const labels = ["0", ...CONTRIBUTION_DENSITY_BANDS.map(band => band.label), "1501+"];
+  const offsets = [0, 31, 104, 188, 282];
+  const scale = Math.min(1, width / 342);
+  return `<g aria-hidden="true">` + readings.map((reading, index) => {
+    const left = x + offsets[index]! * scale;
+    return `<path fill="${contributionFill(reading, theme)}" d="M${left} ${y}${contributionShape(reading, 6)}"/>` + mono(left + 10, y + 6, labels[index], labelSize, theme.muted, 500, "start", 0);
+  }).join("") + "</g>";
 }
 
 function statusColor(state: CiState, theme: SvgTheme): string {
@@ -575,7 +769,7 @@ function statusColor(state: CiState, theme: SvgTheme): string {
 }
 
 function statusLabel(state: CiState): string {
-  return { passing: "Passing", failing: "Failing", pending: "Pending", stale: "Stale", unavailable: "Unavailable", unconfigured: "Unconfigured" }[state];
+  return ({ passing: "Passing", failing: "Failing", pending: "Pending", stale: "Stale", unavailable: "Unavailable", unconfigured: "Unconfigured" } as Record<string, string>)[state] ?? "Unknown";
 }
 
 function lifecycleLabel(state: Lifecycle): string {
@@ -589,36 +783,64 @@ function link(textValue: string, href: string | undefined, x: number, y: number,
   return safe ? `<a href="${escapeXml(safe)}" target="_blank" rel="noopener" aria-label="${label}">${body}</a>` : body;
 }
 
+type EffectiveDataState = CardDataState | "synthetic-demo";
+
+function effectiveDataState(
+  source: CardSource | undefined,
+  dataState: CardDataState | undefined,
+): EffectiveDataState | null {
+  if (source === "synthetic-demo") return "synthetic-demo";
+  return dataState === "partial" || dataState === "stale" || dataState === "unavailable"
+    ? dataState
+    : null;
+}
+
+function sourceDescriptionLead(state: EffectiveDataState | null): string | null {
+  if (state === "synthetic-demo") return "Synthetic demonstration data, not live GitHub data.";
+  if (state === "partial") return "Partially observed public GitHub data; some signals may be missing.";
+  if (state === "stale") return "Stale public GitHub data; this snapshot may no longer reflect current state.";
+  if (state === "unavailable") return "Public GitHub data was unavailable when this snapshot was generated; displayed signals may be incomplete or absent.";
+  return null;
+}
+
 function sourceMetadata(
   source: CardSource | undefined,
+  dataState: CardDataState | undefined,
   title: string,
   description: string,
 ): { title: string; description: string } {
-  if (source !== "synthetic-demo") return { title, description };
+  const state = effectiveDataState(source, dataState);
+  const lead = sourceDescriptionLead(state);
+  if (!state || !lead) return { title, description };
+  const titlePrefix = state === "synthetic-demo" ? "Synthetic demo"
+    : state === "partial" ? "Partial snapshot"
+      : state === "stale" ? "Stale snapshot" : "Data unavailable";
   return {
-    title: boundedLabel(`Synthetic demo: ${title}`, "Synthetic demo card", MAX_TITLE_LENGTH),
-    description: boundedLabel(
-      `Synthetic demonstration data, not live GitHub data. ${description}`,
-      "Synthetic demonstration data, not live GitHub data.",
-      MAX_DESCRIPTION_LENGTH,
-    ),
+    title: boundedLabel(`${titlePrefix}: ${title}`, `${titlePrefix} card`, MAX_TITLE_LENGTH),
+    description: boundedLabel(`${lead} ${description}`, lead, MAX_DESCRIPTION_LENGTH),
   };
 }
 
 function sourceMarker(
   source: CardSource | undefined,
+  dataState: CardDataState | undefined,
   x: number,
   y: number,
   theme: SvgTheme,
   anchor: "start" | "end" = "end",
 ): string {
-  return source === "synthetic-demo"
-    ? `<g aria-hidden="true">${text(x, y, "SYNTHETIC DEMO", 10, theme.warning, 750, anchor)}</g>`
-    : "";
+  const state = effectiveDataState(source, dataState);
+  const label = state === "synthetic-demo" ? "SYNTHETIC DEMO"
+    : state === "partial" ? "PARTIAL SNAPSHOT"
+      : state === "stale" ? "STALE SNAPSHOT"
+        : state === "unavailable" ? "DATA UNAVAILABLE" : null;
+  if (!label) return "";
+  const color = state === "unavailable" ? theme.muted : theme.warning;
+  return `<g aria-hidden="true">${text(x, y, label, 10, color, 750, anchor)}</g>`;
 }
 
 function cardMotionStyle(motion: RenderOptions["motion"]): string {
-  if (motion !== "subtle") return "";
+  if (!motionRenderMetadata(motion).inlineStyles) return "";
   // Fill-mode none with a delay, for the same reason as atlasMotionStyle: a renderer that never
   // runs CSS animations (SVG through <img>) must show the finished card, not a frozen keyframe.
   return `<style>
@@ -640,11 +862,11 @@ export function renderProfileCard(data: ProfileCardData, options?: RenderOptions
   const compact = o.height < 200;
   const bioY = compact && data.location ? 94 : 103;
   const locationY = compact ? 110 : 127;
-  const metadata = sourceMetadata(data.source, o.title, o.description);
+  const metadata = sourceMetadata(data.source, data.dataState, o.title, o.description);
   let out = svgStart(width, o.height, t, metadata.title, metadata.description);
   out += cardMotionStyle(options?.motion) + `<g class="card-enter">`;
   out += panel(16, 16, width - 32, o.height - 32, t);
-  out += sourceMarker(data.source, 34, 31, t, "start");
+  out += sourceMarker(data.source, data.dataState, 34, 31, t, "start");
   out += `<circle cx="64" cy="73" r="31" fill="${t.accent}"/><text x="64" y="82" fill="${t.background}" font-family="Inter,ui-sans-serif,system-ui,sans-serif" font-size="24" font-weight="800" text-anchor="middle">${escapeXml(([...name][0] ?? "?").toUpperCase())}</text>`;
   out += text(112, 54, name, 24, t.text, 750) + text(112, 77, `@${login}`, 13, t.muted);
   if (bio) out += text(112, bioY, bio, 13, t.text);
@@ -682,24 +904,37 @@ export function renderStreakCard(data: StreakCardData, options?: RenderOptions):
   const asOf = isValidIsoDate(data.asOf) ? data.asOf : null;
   const throughPriorDay = currentThrough && asOf && currentThrough !== asOf;
   const currentOpen = data.boundary?.current === "open";
+  // finite() maps NaN and Infinity to 0. An unknown streak must not read as a measured zero.
+  // Negatives stay finite and still clamp to 0.
+  const currentKnown = Number.isFinite(data.current);
+  const longestKnown = Number.isFinite(data.longest);
   const currentCount = finite(data.current);
-  const currentValue = `${formatNumber(currentCount, false)}${currentOpen ? "+" : ""}`;
-  const metadata = sourceMetadata(data.source, o.title, o.description);
+  const currentValue = currentKnown ? `${formatNumber(currentCount, false)}${currentOpen ? "+" : ""}` : "unavailable";
+  const longestText = longestKnown ? `${formatNumber(finite(data.longest), false)} days` : "Longest unavailable";
+  const metadata = sourceMetadata(data.source, data.dataState, o.title, o.description);
+  const currentClause = currentKnown
+    ? `Current streak: ${currentOpen ? "at least " : ""}${formatNumber(currentCount, false)} days${currentThrough ? ` through ${currentThrough}` : ""}`
+    : "current streak unavailable";
+  const longestClause = longestKnown
+    ? `Longest observed in the ${windowLabel}: ${longestText}`
+    : "Longest unavailable";
   const accessibleDescription = data.boundary
-    ? `${metadata.description} Current streak: ${currentOpen ? "at least " : ""}${formatNumber(currentCount, false)} days${currentThrough ? ` through ${currentThrough}` : ""}. Longest observed in the ${windowLabel}: ${formatNumber(finite(data.longest), false)} days. History before this window is not observed.${data.lastActive ? ` Last active ${truncateText(data.lastActive, 22)}.` : ""}`
+    ? `${metadata.description} ${currentClause}. ${longestClause}. History before this window is not observed.${data.lastActive ? ` Last active ${truncateText(data.lastActive, 22)}.` : ""}`
     : metadata.description;
   let out = svgStart(width, o.height, t, metadata.title, metadata.description, accessibleDescription);
   out += cardMotionStyle(options?.motion) + `<g class="card-enter">`;
   out += panel(16, 16, width - 32, o.height - 32, t);
-  out += sourceMarker(data.source, width - 34, 31, t);
+  out += sourceMarker(data.source, data.dataState, width - 34, 31, t);
   out += numeral(34, 48, 1, "CONTRIBUTION STREAK", t);
-  const currentLabel = currentCount <= 0
-    ? "no current streak"
-    : throughPriorDay ? `days · through ${currentThrough}`
-      : currentOpen ? "days current · at least" : data.boundary ? "days current" : "days in returned window";
+  const currentLabel = !currentKnown
+    ? "current streak unavailable"
+    : currentCount <= 0
+      ? "no current streak"
+      : throughPriorDay ? `days · through ${currentThrough}`
+        : currentOpen ? "days current · at least" : data.boundary ? "days current" : "days in returned window";
   out += text(34, 94, currentValue, 46, t.accent, 800) + text(34, 116, currentLabel, throughPriorDay ? 10 : 12, t.text, 600);
   out += `<line x1="${width / 2}" y1="38" x2="${width / 2}" y2="${o.height - 38}" stroke="${t.border}"/>`;
-  out += text(width / 2 + 28, personalBestY, `Longest in ${windowLabel}`, 12, t.muted) + text(width / 2 + 28, longestY, `${formatNumber(finite(data.longest), false)} days`, 24, t.text, 750);
+  out += text(width / 2 + 28, personalBestY, `Longest in ${windowLabel}`, 12, t.muted) + text(width / 2 + 28, longestY, longestText, 24, t.text, 750);
   const totalLabel = Number.isFinite(data.total) ? `Total ${formatNumber(finite(data.total))}` : "Total unavailable";
   const activeDaysLabel = Number.isFinite(data.activeDays) ? `${formatNumber(finite(data.activeDays))} active days` : "Active days unavailable";
   out += text(width / 2 + 28, statusY, `${totalLabel} · ${activeDaysLabel}`, 11, t.muted);
@@ -711,37 +946,44 @@ export function renderStreakCard(data: StreakCardData, options?: RenderOptions):
 }
 
 export function renderActivityCard(data: ActivityCardData, options?: RenderOptions): string {
-  const days = data.days.filter((day) => isValidIsoDate(day.date)).sort((left, right) => left.date.localeCompare(right.date)).slice(-MAX_ACTIVITY_DAYS);
-  const max = Math.max(1, ...days.map((day) => finite(day.count)));
-  const periodLabel = boundedLabel(data.periodLabel, "ACTIVITY", MAX_ACTIVITY_PERIOD_LENGTH);
-  const o = optionsFor(options, 220, "Contribution activity", "A compact contribution activity map with text labels for accessible status.", 180, 280); const t = o.theme; const width = o.width;
-  const metadata = sourceMetadata(data.source, o.title, o.description);
-  const accessibilitySummary = days.map((day) => `${day.date} ${formatNumber(day.count, false)}`).join("; ");
-  const accessibleDescription = accessibilitySummary
-    ? `${metadata.description} Contributions by date, chronologically: ${accessibilitySummary}`
-    : metadata.description;
-  let out = svgStart(width, o.height, t, metadata.title, metadata.description, accessibleDescription);
-  out += cardMotionStyle(options?.motion) + `<g class="card-enter">`;
-  out += panel(16, 16, width - 32, o.height - 32, t) + numeral(34, 48, 1, periodLabel, t);
-  out += sourceMarker(data.source, width - 34, 29, t);
-  out += text(width - 34, 50, `${formatNumber(finite(data.total ?? days.reduce((sum, day) => sum + day.count, 0)))} contributions`, 12, t.text, 600, "end");
+  const days = displayCalendarDays(data.days);
+  const reading = calendarReading(days);
+  const periodLabel = boundedLabel(data.periodLabel, "CONTRIBUTION CALENDAR", MAX_ACTIVITY_PERIOD_LENGTH);
+  const o = optionsFor(options, 220, "Contribution activity", "A compact contribution activity map with text labels for accessible status.", 180, 280);
+  const t = o.theme; const width = o.width;
+  const metadata = sourceMetadata(data.source, data.dataState, o.title, o.description);
+  const accessibleDescription = `${metadata.description} ${CONTRIBUTION_DENSITY_DESCRIPTION} Displayed calendar: ${reading.from} to ${reading.to}, ${reading.observed} observed days, at most the latest 365 calendar days. Contributions by date, chronologically: ${reading.description || "unavailable"}`;
   const grid = calendarGrid(days);
-  const columns = grid.columns; const cell = Math.max(4, Math.min(11, Math.floor((width - 86 - 2 * (columns - 1)) / columns)));
+  const columns = grid.columns;
+  const gap = 2;
+  // Reserve the key and dated scope even when a caller requests the minimum height.
+  const cell = Math.max(2, Math.min(11, Math.floor((width - 86 - gap * (columns - 1)) / columns), Math.floor((o.height - 112) / 7) - 2));
   const start = 40; const top = 66;
-  // Quartiles of the observed peak, so the four steps describe THIS window rather than an
-  // absolute scale no reader can see. A zero day is level 0 and takes the neutral socket.
-  const cells: string[] = [];
-  grid.cells.forEach(({ day, column, row }) => {
-    const count = finite(day.count);
-    const level = Number.isFinite(day.level)
-      ? Math.max(0, Math.min(4, Math.round(day.level as number)))
-      : count <= 0 ? 0 : Math.max(1, Math.min(4, Math.ceil((count / max) * 4)));
-    const x = start + column * (cell + 2); const y = top + row * (cell + 2);
-    cells.push(`<path fill="${densityFill(level, t)}" d="M${x} ${y}h${cell}v${cell}H${x}"/>`);
-  });
-  out += `<g aria-hidden="true">${cells.join("")}</g>`;
-  out += `<g aria-hidden="true">${densityKey(width - 118, top + 7 * (cell + 2) + 10, t)}</g>`;
-  return out + `</g>` + svgEnd();
+  const actualWidth = columns * cell + Math.max(0, columns - 1) * gap;
+  const gridHeight = 7 * (cell + 2) - 2;
+  const canMove = densityCardMotionEnabled(data, days);
+  const ambient = densityMotion({ kind: "activity", namespace: calendarNamespace("activity", days, width, t, options), backend: options?.motionBackend ?? "smil", columns, pitch: cell + gap, left: start, top, height: gridHeight, width: actualWidth, frameWidth: width, ink: t.chrome }, options?.motion === "ambient" && canMove);
+  const compatibility = options?.motion === "ambient" || !canMove ? "" : cardMotionStyle(options?.motion);
+  let out = svgStart(width, o.height, t, metadata.title, metadata.description, accessibleDescription);
+  out += compatibility + ambient.compiled.style + `<g class="card-enter">`;
+  out += panel(16, 16, width - 32, o.height - 32, t) + numeral(34, 48, 1, periodLabel, t);
+  out += sourceMarker(data.source, data.dataState, width - 34, 29, t);
+  // Adapter totals already describe the displayed year. Direct callers with longer input get
+  // the same annual sum, rather than labelling the shorter calendar with an older-history total.
+  const cropped = data.days.some(day => isValidIsoDate(day.date) && day.date < reading.from);
+  const suppliedTotalUnknown = data.total !== undefined && (!Number.isSafeInteger(data.total) || data.total < 0);
+  const headlineTotal = suppliedTotalUnknown ? Number.NaN
+    : data.total !== undefined && !cropped ? data.total
+      : reading.total ?? Number.NaN;
+  const contributionsLabel = Number.isFinite(headlineTotal) ? `${formatNumber(headlineTotal)} contributions` : "Total unavailable";
+  out += text(width - 34, 50, contributionsLabel, 12, t.text, 600, "end");
+  out += `<g aria-hidden="true">${renderContributionCells(grid.cells.map(({ day, column, row }) => ({ date: day.date, count: day.count, x: start + column * (cell + gap), y: top + row * (cell + 2) })), cell, t, "activity-cell")}</g>`;
+  out += ambient.fragment;
+  const bottom = top + gridHeight;
+  out += mono(start, bottom + 15, `${reading.from} — ${reading.to}`, 9.5, t.muted, 500, "start", 0);
+  out += mono(width - 36, bottom + 15, `${reading.observed} observed days`, 9.5, t.muted, 500, "end", 0);
+  out += densityKey(start, bottom + 25, width - 80, t, 9.5);
+  return finishDensityCard(out + `</g>` + svgEnd(), ambient);
 }
 
 const breakdownLabels = [
@@ -752,9 +994,11 @@ const breakdownLabels = [
 ] as const;
 
 function breakdownValue(value: number, basis: ContributionBreakdownCardData["basis"]): string {
+  if (!Number.isFinite(value)) return "unavailable";
+  const amount = finite(value);
   return basis === "public-profile-percentages"
-    ? `${finite(value).toFixed(1).replace(/\.0$/, "")}%`
-    : formatNumber(value, false);
+    ? `${amount.toFixed(1).replace(/\.0$/, "")}%`
+    : formatNumber(amount, false);
 }
 
 /** Render a source-labelled activity-type mix without turning percentages into counts. */
@@ -775,16 +1019,21 @@ export function renderContributionBreakdownCard(
   );
   const t = o.theme;
   const width = o.width;
-  const metadata = sourceMetadata(data.source, o.title, o.description);
-  const values = breakdownLabels.map(([, key]) => finite(data.breakdown[key]));
-  const total = values.reduce((sum, value) => sum + value, 0);
+  const metadata = sourceMetadata(data.source, data.dataState, o.title, o.description);
+  const values = breakdownLabels.map(([, key]) => data.breakdown[key]);
+  const total = values.reduce((sum, value) => sum + (Number.isFinite(value) ? finite(value) : 0), 0);
   const basisLabel = publicProfileMix ? "PUBLIC PROFILE %" : "EXACT COUNTS";
   // Window boundaries come from the caller, so bound them here rather than trusting the adapter.
-  const windowFrom = truncateText(data.window.from, MAX_WINDOW_LABEL_LENGTH);
-  const windowTo = truncateText(data.window.to, MAX_WINDOW_LABEL_LENGTH);
+  // An invalid calendar string is not a window edge. Days stay on their own finite check.
+  const windowFromKnown = isValidIsoDate(data.window.from);
+  const windowToKnown = isValidIsoDate(data.window.to);
+  const windowFrom = windowFromKnown ? truncateText(data.window.from, MAX_WINDOW_LABEL_LENGTH) : "unavailable";
+  const windowTo = windowToKnown ? truncateText(data.window.to, MAX_WINDOW_LABEL_LENGTH) : "unavailable";
+  const windowDaysKnown = Number.isFinite(data.window.days);
+  const windowDaysText = windowDaysKnown ? `${formatNumber(data.window.days, false)} days` : "window unavailable";
   const basisDescription = publicProfileMix
-    ? `GitHub public-profile percentages from calendar-year profile views; these are not exact counts and are not scoped to the requested ${formatNumber(data.window.days, false)}-day contribution-calendar window`
-    : `exact categorized counts for ${windowFrom} to ${windowTo}, ${formatNumber(data.window.days, false)} days`;
+    ? `GitHub public-profile percentages from calendar-year profile views; these are not exact counts and are not scoped to the requested ${windowDaysKnown ? `${formatNumber(data.window.days, false)}-day` : "unavailable"} contribution-calendar window`
+    : `exact categorized counts for ${windowFrom} to ${windowTo}, ${windowDaysText}`;
   const accessibleDescription = `${metadata.description} Basis: ${basisDescription}. ${breakdownLabels.map(([label], index) => `${label}: ${breakdownValue(values[index], data.basis)}`).join(", ")}.`;
   let out = svgStart(width, o.height, t, metadata.title, metadata.description, accessibleDescription);
   out += cardMotionStyle(options?.motion) + `<g class="card-enter">`;
@@ -792,19 +1041,24 @@ export function renderContributionBreakdownCard(
   out += numeral(34, 48, 1, "CONTRIBUTION BREAKDOWN", t);
   out += `<rect x="${width - 150}" y="31" width="116" height="22" fill="${t.background}" stroke="${t.border}"/>`;
   out += mono(width - 92, 46, basisLabel, 10, data.basis === "public-profile-percentages" ? t.warning : t.positive, 600, "middle", 0.1);
-  out += sourceMarker(data.source, width - 34, 70, t);
+  out += sourceMarker(data.source, data.dataState, width - 34, 70, t);
   const scopeLabel = publicProfileMix
     ? width < 480 ? "Profile activity mix · not window-scoped" : "GitHub profile activity mix · not window-scoped"
-    : `${windowFrom} → ${windowTo} · ${formatNumber(data.window.days, false)} days`;
+    : windowFromKnown || windowToKnown
+      ? `${windowFrom} → ${windowTo} · ${windowDaysText}`
+      : windowDaysKnown
+        ? `unavailable · ${windowDaysText}`
+        : "unavailable";
   out += mono(34, 70, scopeLabel, 10, t.muted, 500, "start", 0.06);
   const barX = Math.min(174, Math.max(136, width * 0.24));
   const barWidth = Math.max(40, width - barX - 106);
   breakdownLabels.forEach(([label], index) => {
     const y = 82 + index * 26;
     const value = values[index];
+    const amount = Number.isFinite(value) ? finite(value) : 0;
     const normalized = publicProfileMix
-      ? Math.min(100, value) / 100
-      : total > 0 ? value / total : 0;
+      ? Math.min(100, amount) / 100
+      : total > 0 ? amount / total : 0;
     const fillWidth = barWidth * normalized;
     // One ink, four rows: the bar length is the variable, so the colour does not have to be.
     out += mono(34, y + 9, label, 10, t.muted, 500, "start", 0.08);
@@ -822,12 +1076,16 @@ export function renderContributionBreakdownCard(
 
 function rhythmTrendLabel(trend: RhythmCardData["trend"]): string {
   if (trend.direction === "unavailable") return "Trend unavailable";
-  if (trend.direction === "new") return `${formatNumber(trend.recent28Days, false)} recent contributions · new activity`;
-  if (trend.direction === "flat") return `${formatNumber(trend.recent28Days, false)} recent contributions · flat vs prior 28 days`;
-  if (!Number.isFinite(trend.changePercent)) return `${formatNumber(trend.recent28Days, false)} recent contributions · trend change unavailable`;
+  // formatNumber maps NaN and Infinity to 0. An unknown recent window is not zero contributions.
+  const recent = Number.isFinite(trend.recent28Days)
+    ? `${formatNumber(trend.recent28Days, false)} recent contributions`
+    : "recent contributions unavailable";
+  if (trend.direction === "new") return `${recent} · new activity`;
+  if (trend.direction === "flat") return `${recent} · flat vs prior 28 days`;
+  if (!Number.isFinite(trend.changePercent)) return `${recent} · trend change unavailable`;
   const change = trend.changePercent as number;
   const sign = change > 0 ? "+" : "";
-  return `${formatNumber(trend.recent28Days, false)} recent contributions · ${sign}${change.toFixed(1).replace(/\.0$/, "")}% vs prior 28 days`;
+  return `${recent} · ${sign}${change.toFixed(1).replace(/\.0$/, "")}% vs prior 28 days`;
 }
 
 /** Render the personal, window-bounded contribution consistency card. */
@@ -844,35 +1102,57 @@ export function renderRhythmCard(data: RhythmCardData, options?: RenderOptions):
   );
   const t = o.theme;
   const width = o.width;
+  // finite() and formatNumber map NaN and Infinity to 0. A missing rhythm signal must not
+  // look like a measured zero. Negatives stay finite and still clamp to 0.
+  const scoreKnown = Number.isFinite(data.rhythm.score);
   const score = Math.min(100, finite(data.rhythm.score));
   // Level and basis are caller-supplied prose; bound them so a direct caller cannot inflate the card.
   const level = truncateText(data.rhythm.level, MAX_RHYTHM_LEVEL_LENGTH);
   const basis = truncateText(data.rhythm.basis, MAX_RHYTHM_BASIS_LENGTH);
+  const streakKnown = Number.isFinite(data.currentStreak);
   const current = formatNumber(finite(data.currentStreak), false);
   const open = data.currentStreakBoundary === "open";
   const currentThrough = isValidIsoDate(data.currentStreakThrough) ? data.currentStreakThrough : null;
   const throughPriorDay = currentThrough && currentThrough !== data.window.to;
   const streakText = open ? `at least ${current} days · OPEN` : `${current} days · CLOSED`;
   const streakBoundedText = open ? "open at the returned-window boundary" : "closed within the returned window";
-  const metadata = sourceMetadata(data.source, o.title, o.description);
-  const accessibleDescription = `${metadata.description} Personal consistency score ${Math.round(score)} out of 100, ${level}; this is not a GitHub rank. ${basis}. Density ${finite(data.density).toFixed(1).replace(/\.0$/, "")} percent across ${formatNumber(data.activeDays, false)} active days in a ${formatNumber(data.window.days, false)}-day window. Current streak: ${streakText}${currentThrough ? ` through ${currentThrough}` : ""}; it is ${streakBoundedText}. ${rhythmTrendLabel(data.trend)}.`;
+  const metadata = sourceMetadata(data.source, data.dataState, o.title, o.description);
+  const densityKnown = Number.isFinite(data.density);
+  const activeDaysKnown = Number.isFinite(data.activeDays);
+  const windowDaysKnown = Number.isFinite(data.window.days);
+  const densityPercent = densityKnown ? finite(data.density).toFixed(1).replace(/\.0$/, "") : "";
+  const scoreClause = scoreKnown
+    ? `Personal consistency score ${Math.round(score)} out of 100`
+    : "Personal consistency score is unavailable";
+  // The band is a function of the score, so it is withheld with the score.
+  const levelClause = scoreKnown ? `, ${level}` : "";
+  const densityClause = densityKnown ? `Density ${densityPercent} percent` : "density unavailable";
+  const activeDaysClause = activeDaysKnown
+    ? `${formatNumber(data.activeDays, false)} active days`
+    : "active days unavailable";
+  const windowClause = windowDaysKnown
+    ? `${formatNumber(data.window.days, false)}-day window`
+    : "window unavailable";
+  const streakClause = streakKnown ? `Current streak: ${streakText}` : "current streak unavailable";
+  const accessibleDescription = `${metadata.description} ${scoreClause}${levelClause}; this is not a GitHub rank. ${basis}. ${densityClause} across ${activeDaysClause} in a ${windowClause}. ${streakClause}${currentThrough ? ` through ${currentThrough}` : ""}; it is ${streakBoundedText}. ${rhythmTrendLabel(data.trend)}.`;
   let out = svgStart(width, o.height, t, metadata.title, metadata.description, accessibleDescription);
   out += cardMotionStyle(options?.motion) + `<g class="card-enter">`;
   out += panel(16, 16, width - 32, o.height - 32, t);
   out += numeral(34, 48, 1, "PERSONAL CONSISTENCY", t);
-  out += sourceMarker(data.source, width - 34, 48, t);
+  out += sourceMarker(data.source, data.dataState, width - 34, 48, t);
   const radius = compact ? 42 : 43;
   const centerX = compact ? 91 : 88;
   const centerY = compact ? 120 : 112;
   const circumference = 2 * Math.PI * radius;
   const progress = circumference * score / 100;
   out += `<circle cx="${centerX}" cy="${centerY}" r="${radius}" stroke="${t.background}" stroke-width="10"/><circle cx="${centerX}" cy="${centerY}" r="${radius}" stroke="${t.accent}" stroke-width="10" stroke-linecap="round" stroke-dasharray="${progress.toFixed(2)} ${circumference.toFixed(2)}" transform="rotate(-90 ${centerX} ${centerY})"/>`;
-  out += text(centerX, centerY + 7, `${Math.round(score)}`, 28, t.text, 800, "middle") + text(centerX, centerY + 24, "/ 100", 10, t.muted, 650, "middle");
+  // The word does not fit the score ring at 28px, so only the unknown numeral shrinks.
+  out += text(centerX, centerY + 7, scoreKnown ? `${Math.round(score)}` : "unavailable", scoreKnown ? 28 : 12, t.text, scoreKnown ? 800 : 700, "middle") + text(centerX, centerY + 24, "/ 100", 10, t.muted, 650, "middle");
   const infoX = compact ? 164 : 166;
-  out += text(infoX, compact ? 91 : 88, level.toUpperCase(), 11, t.accent, 750);
-  const densityLabel = `${finite(data.density).toFixed(1).replace(/\.0$/, "")}% density · ${formatNumber(data.activeDays, false)} active days`;
+  out += text(infoX, compact ? 91 : 88, scoreKnown ? level.toUpperCase() : "UNAVAILABLE", 11, t.accent, 750);
+  const densityLabel = `${densityKnown ? `${densityPercent}% density` : "density unavailable"} · ${activeDaysClause}`;
   out += text(infoX, compact ? 114 : 111, truncateText(densityLabel, compact ? 34 : 64), 11, t.text, 600);
-  out += text(infoX, compact ? 134 : 131, `${formatNumber(data.window.days, false)}-day window · current ${streakText}`, 10, t.muted, 550);
+  out += text(infoX, compact ? 134 : 131, `${windowClause} · ${streakKnown ? `current ${streakText}` : "current streak unavailable"}`, 10, t.muted, 550);
   const boundaryLabel = throughPriorDay ? `Current streak observed through ${currentThrough}` : open ? "Streak can continue beyond this window" : "Streak is bounded to this window";
   out += text(infoX, compact ? 154 : 151, truncateText(boundaryLabel, compact ? 36 : 64), 10, t.muted, 550);
   const trendX = compact ? 28 : 400;
@@ -910,17 +1190,21 @@ export function renderLanguagesCard(data: LanguagesCardData, options?: RenderOpt
   }
   const sourceByteTotal = data.languages.reduce((sum, item) => sum + finite(item.bytes), 0);
   const byteTotal = finite(data.totalBytes) > 0 ? finite(data.totalBytes) : sourceByteTotal;
-  const percentageFor = (item: LanguageStat): number => Number.isFinite(item.percentage)
-    ? Math.min(100, finite(item.percentage))
-    : finite(item.bytes) / Math.max(1, byteTotal) * 100;
-  const metadata = sourceMetadata(data.source, o.title, o.description);
+  // Neither a finite percentage nor finite bytes is an unknown share. `finite` would paint that as 0%.
+  const percentageFor = (item: LanguageStat): number | null => {
+    if (Number.isFinite(item.percentage)) return Math.min(100, finite(item.percentage));
+    if (!Number.isFinite(item.bytes)) return null;
+    return finite(item.bytes) / Math.max(1, byteTotal) * 100;
+  };
+  const metadata = sourceMetadata(data.source, data.dataState, o.title, o.description);
   let out = svgStart(width, o.height, t, metadata.title, metadata.description);
   out += cardMotionStyle(options?.motion) + `<g class="card-enter">`;
   out += panel(16, 16, width - 32, o.height - 32, t) + numeral(34, 48, 1, "LANGUAGES", t);
-  out += sourceMarker(data.source, width - 34, 48, t);
+  out += sourceMarker(data.source, data.dataState, width - 34, 48, t);
   const barX = 34; const barY = 68; const barW = width - 68; const barH = 12; let cursor = barX;
   languages.forEach((item, index) => {
     const raw = percentageFor(item);
+    if (raw === null) return;
     const segment = barW * Math.max(0, Math.min(100, raw)) / 100;
     if (segment > 0) { out += `<rect x="${cursor.toFixed(2)}" y="${barY}" width="${segment.toFixed(2)}" height="${barH}" fill="${safeColor(item.color, t.languagePalette[index % t.languagePalette.length])}"/>`; cursor += segment; }
   });
@@ -929,9 +1213,10 @@ export function renderLanguagesCard(data: LanguagesCardData, options?: RenderOpt
     const x = 34 + (index % 2) * (barW / 2); const y = 111 + Math.floor(index / 2) * 25;
     const color = safeColor(item.color, t.languagePalette[index % t.languagePalette.length]);
     const label = item.name ?? item.language ?? "Unknown language";
+    const share = raw === null ? "Languages unavailable" : `${raw.toFixed(1).replace(/\.0$/, "")}%`;
     // Square swatch, not a disc: it matches the density cell so the two surfaces read as one
     // system, and a square survives at the sizes a README actually renders at.
-    out += `<rect x="${x + 1}" y="${y - 8}" width="8" height="8" fill="${color}"/>` + text(x + 16, y, truncateText(label, 19), 11.5, t.text, 600) + mono(x + barW / 2 - 10, y, `${raw.toFixed(1).replace(/\.0$/, "")}%`, 10, t.muted, 500, "end", 0.04);
+    out += `<rect x="${x + 1}" y="${y - 8}" width="8" height="8" fill="${color}"/>` + text(x + 16, y, truncateText(label, 19), 11.5, t.text, 600) + mono(x + barW / 2 - 10, y, share, 10, t.muted, 500, "end", 0.04);
   });
   return out + `</g>` + svgEnd();
 }
@@ -942,10 +1227,10 @@ export function renderProjectBoard(data: ProjectBoardData, options?: RenderOptio
   const columns = normalizedWidth >= 620 ? 2 : 1; const rows = Math.max(1, Math.ceil(projects.length / columns));
   const o = optionsFor(options, 68 + rows * 90, "Project signals", "Project lifecycle and CI signals for selected GitHub repositories.", 68 + rows * 90, 700); const t = o.theme; const width = o.width;
   const height = o.height; const cardWidth = (width - 48 - (columns - 1) * 12) / columns;
-  const metadata = sourceMetadata(data.source, o.title, o.description);
+  const metadata = sourceMetadata(data.source, data.dataState, o.title, o.description);
   let out = svgStart(width, height, t, metadata.title, metadata.description);
   out += cardMotionStyle(options?.motion) + `<g class="card-enter">`;
-  out += sourceMarker(data.source, width - 24, 18, t);
+  out += sourceMarker(data.source, data.dataState, width - 24, 18, t);
   out += numeral(24, 34, 1, "PROJECT SIGNALS", t);
   if (projects.length < totalProjects) out += text(width - 24, 34, `${projects.length} of ${totalProjects} shown`, 11, t.muted, 500, "end");
   projects.forEach((project, index) => {
@@ -963,9 +1248,9 @@ export function renderProjectBoard(data: ProjectBoardData, options?: RenderOptio
 }
 
 function atlasMotionStyle(motion: RenderOptions["motion"]): string {
-  if (motion !== "subtle") return "";
-  // Chromium never runs CSS animations inside an SVG rendered through <img> — GitHub's README
-  // pipeline — so the card must be finished before any keyframe applies. That means fill-mode
+  if (!motionRenderMetadata(motion).inlineStyles) return "";
+  // Image embedding can freeze or ignore CSS (as the earlier GitHub profile probe did), so the
+  // card must be finished before any keyframe applies. That means fill-mode
   // none with a small delay, never "both": a renderer that ignores or freezes the animation sits
   // in the delay phase and shows the natural, final geometry, while an animating renderer still
   // gets the rise. Bars overlay static tracks, so their pre-run state must be exact, not close.
@@ -980,18 +1265,26 @@ function atlasMetric(x: number, y: number, label: string, value: string, theme: 
   return text(x, y, value, 20, theme.text, 760) + text(x, y + 17, label.toUpperCase(), 9, theme.muted, 650);
 }
 
+function atlasRecentCount(value: number): string {
+  // formatNumber maps a missing count to 0. An unknown recent window is not zero contributions.
+  return Number.isFinite(value) ? formatNumber(value) : "recent unavailable";
+}
+
 function atlasTrendLabel(data: AtlasCardData): string {
-  if (data.trend.direction === "unavailable") return `${formatNumber(data.trend.recent28Days)} in latest 28 days`;
-  if (data.trend.direction === "new") return `${formatNumber(data.trend.recent28Days)} · new activity`;
+  const recent = atlasRecentCount(data.trend.recent28Days);
+  if (data.trend.direction === "unavailable") return `${recent} in latest 28 days`;
+  if (data.trend.direction === "new") return `${recent} · new activity`;
   const change = data.trend.changePercent;
-  if (change === null) return `${formatNumber(data.trend.recent28Days)} in latest 28 days`;
+  if (change === null) return `${recent} in latest 28 days`;
   // A non-finite change is an unknown signal, not a zero one: say so instead of printing NaN.
-  if (!Number.isFinite(change)) return `${formatNumber(data.trend.recent28Days)} · trend change unavailable`;
+  if (!Number.isFinite(change)) return `${recent} · trend change unavailable`;
   const sign = change > 0 ? "+" : "";
-  return `${formatNumber(data.trend.recent28Days)} · ${sign}${change.toFixed(1).replace(/\.0$/, "")}% vs prior 28d`;
+  return `${recent} · ${sign}${change.toFixed(1).replace(/\.0$/, "")}% vs prior 28d`;
 }
 
 function atlasBreakdownValue(value: number, basis: AtlasCardData["breakdownBasis"]): string {
+  // A missing mix value is not a measured zero. Negatives stay finite and still clamp to 0.
+  if (!Number.isFinite(value)) return "unavailable";
   if (basis === "public-profile-percentages") {
     return `${finite(value).toFixed(1).replace(/\.0$/, "")}%`;
   }
@@ -1028,7 +1321,7 @@ export function renderCadenceCard(data: CadenceCardData, options?: RenderOptions
   const busiestDays = normalizedTotal > 0
     ? shares.flatMap((share, index) => share === maxShare ? [index] : [])
     : [];
-  const metadata = sourceMetadata(data.source, o.title, o.description);
+  const metadata = sourceMetadata(data.source, data.dataState, o.title, o.description);
   const busiestDescription = busiestDays.length > 1
     ? ` Busiest days: ${busiestDays.map((index) => WEEKDAY_NAMES[index]).join(", ")} at ${maxShare.toFixed(1).replace(/\.0$/, "")}%.`
     : "";
@@ -1042,7 +1335,7 @@ export function renderCadenceCard(data: CadenceCardData, options?: RenderOptions
   out += cardMotionStyle(options?.motion) + `<g class="card-enter">`;
   out += panel(16, 16, width - 32, o.height - 32, t);
   out += numeral(34, 48, 1, "WEEKLY CADENCE", t);
-  out += sourceMarker(data.source, width - 34, 31, t);
+  out += sourceMarker(data.source, data.dataState, width - 34, 31, t);
   if (normalizedTotal === 0) {
     out += text(34, o.height / 2 + 6, "No contributions observed in this window", 13, t.muted, 550);
     return out + `</g>` + svgEnd();
@@ -1113,7 +1406,7 @@ export function renderReleasesCard(data: ReleasesCardData, options?: RenderOptio
   // shrink margins but never clip a release row out of the panel.
   const rowsHeight = 92 + rows * 34 + 30;
   const o = optionsFor(options, rowsHeight, "Latest releases", "The most recent published release per curated project, newest first.", rowsHeight, 420); const t = o.theme; const width = o.width;
-  const metadata = sourceMetadata(data.source, o.title, o.description);
+  const metadata = sourceMetadata(data.source, data.dataState, o.title, o.description);
   const absenceSentence = absentCount > 0
     ? ` ${absentCount} of ${observed} observed curated projects have no published release observed.`
     : "";
@@ -1134,7 +1427,7 @@ export function renderReleasesCard(data: ReleasesCardData, options?: RenderOptio
   out += cardMotionStyle(options?.motion) + `<g class="card-enter">`;
   out += panel(16, 16, width - 32, o.height - 32, t);
   out += numeral(34, 48, 1, "LATEST RELEASES", t);
-  out += sourceMarker(data.source, width - 34, 31, t);
+  out += sourceMarker(data.source, data.dataState, width - 34, 31, t);
   if (!releases.length) {
     if (unavailableCount > 0) {
       const allUnavailable = observed === 0;
@@ -1168,11 +1461,470 @@ export function renderReleasesCard(data: ReleasesCardData, options?: RenderOptio
   return out + `</g>` + svgEnd();
 }
 
+const DELIVERY_WINDOW_ORDER = [7, 30, 90, 365] as const;
+const DELIVERY_COMPACT_BREAKPOINT = 620;
+const DELIVERY_WIDE_HEIGHT = 400;
+const DELIVERY_COMPACT_HEIGHT = 580;
+/** Caller-supplied handles stay compact in the card title. */
+const MAX_DELIVERY_LOGIN_LENGTH = 32;
+/** Benchmark publisher names stay on one provenance line. */
+const MAX_DELIVERY_PUBLISHER_LENGTH = 48;
+/** Repository names stay readable in the accessible repository list. */
+const MAX_DELIVERY_REPOSITORY_LENGTH = 40;
+/** Population, cohort, caveat, and limitation prose stays bounded in the description. */
+const MAX_DELIVERY_EVIDENCE_PROSE_LENGTH = 240;
+/** The literal non-claim every delivery card prints, visibly and accessibly. */
+const DELIVERY_NON_CLAIM = "ACTIVITY FLOW · NOT QUALITY OR IMPACT";
+
+/** A validated count, or null when the signal is unknown, missing, or stale. */
+function deliveryCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/** Exact integer counts; an unknown count is stated, never zeroed into a false reading. */
+function deliveryCountLabel(value: unknown): string {
+  const count = deliveryCount(value);
+  return count === null ? "UNKNOWN" : formatNumber(count, false);
+}
+
+function deliverySpokenCount(value: unknown): string {
+  const count = deliveryCount(value);
+  return count === null ? "unknown" : formatNumber(count, false);
+}
+
+/** Merged pull requests per week with one decimal; unknown stays unknown. */
+function deliveryRateLabel(value: unknown): string {
+  const rate = deliveryCount(value);
+  return rate === null ? "UNKNOWN" : rate.toFixed(1);
+}
+
+/**
+ * Evidence ratios as one-decimal percentages. The 30-day integration balance may exceed
+ * 100% — merges in a period are not necessarily drawn from openings in the same period —
+ * so the value is never capped. A zero denominator in the evidence is null, never zero.
+ */
+function deliveryRatioLabel(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "UNAVAILABLE";
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function deliverySpokenRatio(value: unknown): string {
+  const label = deliveryRatioLabel(value);
+  return label === "UNAVAILABLE" ? "unavailable" : label.toLowerCase();
+}
+
+/** The dated benchmark comparison; an unreadable multiple is stated, never zeroed. */
+function deliveryMultipleLabel(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "UNAVAILABLE";
+  return `${value.toFixed(1)}×`;
+}
+
+function deliverySpokenMultiple(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "an unavailable multiple of";
+  return `${value.toFixed(1)} times`;
+}
+
+/** Open-work merge-weeks with two decimals; a zero 7-day merge rate is null upstream. */
+function deliveryWeeksLabel(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "UNAVAILABLE";
+  return value.toFixed(2);
+}
+
+function deliveryWindowFor(
+  windows: readonly DeliveryCardWindow[] | undefined,
+  days: number,
+): DeliveryCardWindow | null {
+  if (!Array.isArray(windows)) return null;
+  return windows.find((window) => window?.days === days) ?? null;
+}
+
+function deliveryShortRange(window: DeliveryCardWindow | null): string | null {
+  if (!window || !isValidIsoDate(window.from) || !isValidIsoDate(window.to)) return null;
+  return `${window.from.slice(5)} → ${window.to.slice(5)}`;
+}
+
+/** Render scoped public pull-request flow evidence on the shared card chassis. */
+export function renderDeliveryCard(data: DeliveryCardData, options?: RenderOptions): string {
+  const seven = deliveryWindowFor(data.windows, 7);
+  if (!seven) throw new Error("Delivery card requires a 7-day window");
+  const normalizedWidth = dimension(options?.width, 860, MIN_WIDTH, MAX_WIDTH);
+  const compact = normalizedWidth < DELIVERY_COMPACT_BREAKPOINT;
+  const defaultHeight = compact ? DELIVERY_COMPACT_HEIGHT : DELIVERY_WIDE_HEIGHT;
+  const login = truncateText(data.login, MAX_DELIVERY_LOGIN_LENGTH) || "unknown user";
+  const o = optionsFor(
+    { ...options, width: normalizedWidth },
+    defaultHeight,
+    `Delivery evidence for ${login}`,
+    `Scoped public pull-request flow for ${login}; activity flow, not quality or impact.`,
+    defaultHeight,
+    defaultHeight + 160,
+  );
+  const t = o.theme;
+  const width = o.width;
+  const height = o.height;
+
+  const rateLabel = deliveryRateLabel(seven.mergedPerWeek);
+  const benchmark = data.benchmark;
+  const multipleLabel = deliveryMultipleLabel(benchmark == null ? null : data.derived.benchmarkMultiple7);
+  const conversionLabel = deliveryRatioLabel(data.derived.resolvedMergeConversion);
+  const balanceLabel = deliveryRatioLabel(data.derived.integrationBalance30);
+  const concentrationLabel = deliveryRatioLabel(data.derived.topTwoConcentration30);
+  const weeksLabel = deliveryWeeksLabel(data.derived.wipMergeWeeks);
+  const openLabel = deliveryCountLabel(data.lifetime.open);
+  const wipValue = openLabel === "UNKNOWN" ? "UNKNOWN" : `${openLabel} OPEN`;
+  const wipNote = weeksLabel === "UNAVAILABLE"
+    ? "merge-weeks unavailable"
+    : `${weeksLabel} merge-weeks at 7d rate`;
+
+  const sevenRange = isValidIsoDate(seven.from) && isValidIsoDate(seven.to)
+    ? `${truncateText(seven.from, MAX_WINDOW_LABEL_LENGTH)} → ${truncateText(seven.to, MAX_WINDOW_LABEL_LENGTH)}`
+    : "DATES UNKNOWN";
+  const repositories = Array.isArray(data.scope.repositories) ? data.scope.repositories : null;
+  const scopeLabel = repositories === null
+    ? "SCOPE UNKNOWN"
+    : `${formatNumber(repositories.length, false)} CONFIGURED PUBLIC REPOS`;
+  const queryCount = deliveryCount(data.source.queryCount);
+  const provider = truncateText(String(data.source.provider ?? "").replaceAll("-", " ").toUpperCase(), 16) || "UNKNOWN SOURCE";
+  const refreshed = /^\d{4}-\d{2}-\d{2}/.test(String(data.generatedAt ?? ""))
+    ? String(data.generatedAt).slice(0, 10)
+    : truncateText(data.generatedAt, MAX_WINDOW_LABEL_LENGTH) || "UNKNOWN";
+  const benchmarkValue = typeof benchmark?.value === "number" && Number.isFinite(benchmark.value) && benchmark.value > 0
+    ? String(benchmark.value)
+    : "UNKNOWN";
+  const benchmarkDate = /^\d{4}-\d{2}-\d{2}$/.test(String(benchmark?.publishedAt ?? ""))
+    ? String(benchmark?.publishedAt)
+    : "UNDATED";
+  const publisher = truncateText(
+    benchmark?.publisher ?? "",
+    compact && width < 560 ? 20 : MAX_DELIVERY_PUBLISHER_LENGTH,
+  ) || "UNKNOWN PUBLISHER";
+
+  const accessibleDescription = deliveryAccessibleDescription(data, {
+    login, rateLabel, sevenRange, scopeLabel, conversionLabel, balanceLabel,
+    openLabel, weeksLabel, concentrationLabel, provider, refreshed, benchmarkValue, benchmarkDate,
+  });
+  let out = svgStart(width, height, t, o.title, o.description, accessibleDescription);
+  out += cardMotionStyle(options?.motion) + `<g class="card-enter">`;
+  out += panel(16, 16, width - 32, height - 32, t);
+  out += numeral(34, 48, 1, "DELIVERY EVIDENCE", t);
+  out += mono(width - 34, 48, "PUBLIC GRAPHQL COUNTS", 10, t.muted, 500, "end", 0.1);
+  out += `<line x1="34" y1="62" x2="${width - 34}" y2="62" stroke="${t.border}"/>`;
+
+  out += mono(34, 88, "7-DAY MERGED RATE", 10, t.muted);
+  out += text(34, 136, rateLabel, 44, t.accent, 800);
+  out += text(34, 156, "PRS / WEEK", 12, t.text, 700);
+  const pillLabel = benchmark == null ? "BENCHMARK UNAVAILABLE" : `${multipleLabel} DATED BENCHMARK`;
+  const benchmarkLine = benchmark == null
+    ? "BENCHMARK UNAVAILABLE · NO EXTERNAL REFERENCE"
+    : `BENCHMARK ${publisher.toUpperCase()} · ${benchmarkValue}/WK · ${benchmarkDate}`;
+  const pillWidth = Math.min(compact ? width - 68 : 300, 26 + Math.ceil([...pillLabel].length * 7.3));
+  out += `<rect x="34" y="166" width="${pillWidth}" height="26" rx="13" fill="${t.track}" stroke="${t.border}"/>`;
+  out += mono(34 + pillWidth / 2, 183, pillLabel, 11, t.chrome, 700, "middle", 0.06);
+  if (compact) {
+    out += mono(width - 34, 156, scopeLabel, 9.5, t.muted, 500, "end", 0.06);
+    out += mono(width - 34, 183, sevenRange, 10, t.muted, 500, "end", 0.06);
+  } else {
+    out += mono(34, 208, sevenRange, 10, t.muted, 500, "start", 0.06);
+    out += mono(34, 226, scopeLabel, 10, t.muted, 500, "start", 0.06);
+  }
+
+  const metricCells: ReadonlyArray<readonly [string, string, string]> = [
+    ["MERGE CONVERSION", conversionLabel, "merged / closed"],
+    ["30D INTEGRATION", balanceLabel, "merged / opened"],
+    ["OPEN WIP", wipValue, wipNote],
+    ["TOP-2 FOCUS", concentrationLabel, "share of 30d openings"],
+  ];
+  if (compact) {
+    const cardWidth = (width - 36 - 12) / 2;
+    metricCells.forEach(([label, value, note], index) => {
+      const x = 18 + (index % 2) * (cardWidth + 12);
+      const y = 202 + Math.floor(index / 2) * 88;
+      out += deliveryMetricCell(x, y, cardWidth, 80, label, value, note, t);
+    });
+    out += `<line x1="18" y1="384" x2="${width - 18}" y2="384" stroke="${t.border}"/>`;
+    out += mono(34, 406, "PR FLOW · OPENED → MERGED · RATE / WEEK", 9.5, t.muted, 500, "start", 0.08);
+    const columnWidth = (width - 68 - 12) / 2;
+    DELIVERY_WINDOW_ORDER.forEach((days, index) => {
+      const x = 34 + (index % 2) * (columnWidth + 12);
+      const y = 424 + Math.floor(index / 2) * 38;
+      out += deliveryWindowCell(x, y, days, deliveryWindowFor(data.windows, days), t);
+    });
+    const authored = deliveryCountLabel(data.lifetime.authored);
+    const merged = deliveryCountLabel(data.lifetime.merged);
+    const closed = deliveryCountLabel(data.lifetime.closed);
+    out += mono(34, 504, `LIFETIME ${authored} AUTHORED · ${merged} MERGED · ${closed} CLOSED · ${openLabel} OPEN`, 9.5, t.muted, 500, "start", 0.06);
+    out += mono(34, 522, benchmarkLine, 9.5, t.muted, 500, "start", 0.06);
+    const footer = `${provider} · ${queryCount === null ? "QUERY COUNT UNKNOWN" : `${formatNumber(queryCount, false)} QUERIES`} · REFRESHED ${refreshed}`;
+    out += mono(34, 540, footer, 9.5, t.muted, 500, "start", 0.04);
+    out += mono(width / 2, 560, DELIVERY_NON_CLAIM, 9.5, t.warning, 700, "middle", 0.06);
+  } else {
+    const metricsX = 352;
+    const metricsWidth = width - metricsX - 34;
+    const columnWidth = (metricsWidth - 12) / 2;
+    metricCells.forEach(([label, value, note], index) => {
+      const x = metricsX + (index % 2) * (columnWidth + 12);
+      const y = 80 + Math.floor(index / 2) * 92;
+      out += deliveryMetricCell(x, y, columnWidth, 80, label, value, note, t);
+    });
+    out += `<line x1="34" y1="264" x2="${width - 34}" y2="264" stroke="${t.border}"/>`;
+    out += mono(34, 286, "PR FLOW · OPENED → MERGED · RATE / WEEK", 9.5, t.muted, 500, "start", 0.08);
+    const columnWidthWide = (width - 68) / 4;
+    DELIVERY_WINDOW_ORDER.forEach((days, index) => {
+      out += deliveryWindowCell(34 + index * columnWidthWide, 304, days, deliveryWindowFor(data.windows, days), t);
+    });
+    const authored = deliveryCountLabel(data.lifetime.authored);
+    const merged = deliveryCountLabel(data.lifetime.merged);
+    const closed = deliveryCountLabel(data.lifetime.closed);
+    const drafts = deliveryCount(data.lifetime.drafts);
+    out += mono(34, 348, `LIFETIME ${authored} AUTHORED · ${merged} MERGED · ${closed} CLOSED · ${openLabel} OPEN${drafts !== null && drafts > 0 ? ` · ${formatNumber(drafts, false)} DRAFTS` : ""}`, 9.5, t.muted, 500, "start", 0.06);
+    out += mono(34, 360, benchmarkLine, 9.5, t.muted, 500, "start", 0.06);
+    const footer = `${provider} · ${queryCount === null ? "QUERY COUNT UNKNOWN" : `${formatNumber(queryCount, false)} QUERIES`} · REFRESHED ${refreshed}`;
+    out += mono(34, height - 26, footer, 9.5, t.muted, 500, "start", 0.04);
+    out += mono(width - 34, height - 26, DELIVERY_NON_CLAIM, 9.5, t.warning, 700, "end", 0.06);
+  }
+  return out + `</g>` + svgEnd();
+}
+
+function deliveryMetricCell(
+  x: number,
+  y: number,
+  cellWidth: number,
+  cellHeight: number,
+  label: string,
+  value: string,
+  note: string,
+  theme: SvgTheme,
+): string {
+  let out = `<rect x="${x}" y="${y}" width="${cellWidth}" height="${cellHeight}" rx="10" fill="${theme.surface}" stroke="${theme.border}"/>`;
+  out += mono(x + 14, y + 22, label, 9.5, theme.muted, 500, "start", 0.08);
+  out += text(x + 14, y + 50, value, 19, theme.text, 760);
+  out += mono(x + 14, y + 68, note, 9.5, theme.muted, 500, "start", 0.06);
+  return out;
+}
+
+function deliveryWindowCell(
+  x: number,
+  y: number,
+  days: number,
+  window: DeliveryCardWindow | null,
+  theme: SvgTheme,
+): string {
+  const opened = window ? deliveryCount(window.opened) : null;
+  const merged = window ? deliveryCount(window.merged) : null;
+  const rate = window ? deliveryCount(window.mergedPerWeek) : null;
+  const range = deliveryShortRange(window);
+  if (opened === null || merged === null || rate === null) {
+    return mono(x, y, `${days}D · UNKNOWN`, 9.5, theme.muted, 500, "start", 0.08) +
+      text(x, y + 18, "not observed", 12, theme.muted, 550);
+  }
+  return mono(x, y, range ? `${days}D · ${range}` : `${days}D`, 9.5, theme.muted, 500, "start", 0.08) +
+    text(x, y + 18, `${formatNumber(opened, false)}→${formatNumber(merged, false)} · ${rate.toFixed(1)}/wk`, 12, theme.text, 650);
+}
+
+function deliveryAccessibleDescription(
+  data: DeliveryCardData,
+  readings: {
+    readonly login: string;
+    readonly rateLabel: string;
+    readonly sevenRange: string;
+    readonly scopeLabel: string;
+    readonly conversionLabel: string;
+    readonly balanceLabel: string;
+    readonly openLabel: string;
+    readonly weeksLabel: string;
+    readonly concentrationLabel: string;
+    readonly provider: string;
+    readonly refreshed: string;
+    readonly benchmarkValue: string;
+    readonly benchmarkDate: string;
+  },
+): string {
+  const rateSpoken = readings.rateLabel === "UNKNOWN" ? "an unknown rate of" : `${readings.rateLabel}`;
+  const benchmark = data.benchmark;
+  const label = truncateText(benchmark?.label ?? "", MAX_DELIVERY_EVIDENCE_PROSE_LENGTH) || "unknown reference";
+  const population = truncateText(benchmark?.population ?? "", MAX_DELIVERY_EVIDENCE_PROSE_LENGTH) || "unknown population";
+  const cohort = truncateText(benchmark?.cohort ?? "", MAX_DELIVERY_EVIDENCE_PROSE_LENGTH) || "unknown cohort";
+  const caveats = Array.isArray(benchmark?.caveats) && benchmark.caveats.length > 0
+    ? benchmark.caveats.map((caveat) => truncateText(caveat, MAX_DELIVERY_EVIDENCE_PROSE_LENGTH)).join(" ")
+    : "No caveats recorded.";
+  const limitations = Array.isArray(data.limitations) && data.limitations.length > 0
+    ? data.limitations.map((limitation) => truncateText(limitation, MAX_DELIVERY_EVIDENCE_PROSE_LENGTH)).join(" ")
+    : "No limitations recorded.";
+  const repositories = Array.isArray(data.scope.repositories) ? data.scope.repositories : null;
+  const repositoryList = repositories === null
+    ? "unknown scope"
+    : repositories.length === 0
+      ? "no configured repositories"
+      : repositories.map((repository) => truncateText(repository, MAX_DELIVERY_REPOSITORY_LENGTH)).join(", ");
+  const windowReadings = DELIVERY_WINDOW_ORDER.map((days) => {
+    const window = deliveryWindowFor(data.windows, days);
+    const opened = window ? deliverySpokenCount(window.opened) : "unknown";
+    const merged = window ? deliverySpokenCount(window.merged) : "unknown";
+    return `${days}-day ${opened} opened and ${merged} merged`;
+  }).join("; ");
+  const drafts = deliveryCount(data.lifetime.drafts);
+  const sourceUrl = truncateText(benchmark?.sourceUrl ?? "", MAX_DELIVERY_EVIDENCE_PROSE_LENGTH);
+  const comparison = benchmark == null
+    ? "No external benchmark is configured; the comparison is unavailable. "
+    : `${deliverySpokenMultiple(data.derived.benchmarkMultiple7)} the dated ${label} reference of ` +
+      `${readings.benchmarkValue} merged pull requests per engineer-week, published ${readings.benchmarkDate}. ` +
+      `Population: ${population} Cohort: ${cohort} Benchmark source: ${sourceUrl || "not recorded"}. Caveats: ${caveats} `;
+  return `${rateSpoken} merged pull requests per week during ${readings.sevenRange}. ` +
+    comparison +
+    `Resolved merge conversion ${deliverySpokenRatio(data.derived.resolvedMergeConversion)}; ` +
+    `30-day integration balance ${deliverySpokenRatio(data.derived.integrationBalance30)}; ` +
+    `open work in progress ${deliverySpokenCount(data.lifetime.open)}` +
+    `${readings.weeksLabel === "UNAVAILABLE" ? " with unavailable merge-weeks" : ` at ${readings.weeksLabel} merge-weeks`}; ` +
+    `top-two repository concentration ${deliverySpokenRatio(data.derived.topTwoConcentration30)}; ` +
+    `top-six repository concentration ${deliverySpokenRatio(data.derived.topSixConcentration30)}; ` +
+    `lifetime ${deliverySpokenCount(data.lifetime.authored)} authored, ` +
+    `${deliverySpokenCount(data.lifetime.merged)} merged, ` +
+    `${deliverySpokenCount(data.lifetime.closed)} closed, ` +
+    `${deliverySpokenCount(data.lifetime.open)} open` +
+    `${drafts !== null && drafts > 0 ? `, including ${formatNumber(drafts, false)} drafts` : ""}; ` +
+    `${windowReadings}. ` +
+    `Scope: ${readings.scopeLabel.toLowerCase()} for ${readings.login}: ${repositoryList}. ` +
+    `Source: ${readings.provider} aggregate pull-request search counts, refreshed ${readings.refreshed}; ` +
+    `as of ${truncateText(data.asOf, MAX_WINDOW_LABEL_LENGTH) || "an unknown date"}. ` +
+    `Limitations: ${limitations} ` +
+    `Pull-request flow is activity flow, not quality or impact.`;
+}
+
+const PULSE_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+/** Six rows like the releases card; anything beyond prints as an "N of M shown" line. */
+const PULSE_MAX_ROWS = 6;
+
+function pulseStateLabel(state: PulseProbeState): string {
+  return { up: "Up", down: "Down", unknown: "Unknown", stale: "Stale" }[state];
+}
+
+function pulseStateColor(state: PulseProbeState, theme: SvgTheme): string {
+  if (state === "up") return theme.positive;
+  if (state === "down") return theme.negative;
+  if (state === "stale") return theme.warning;
+  return theme.muted;
+}
+
+function pulseTimestampValue(value: unknown): number | null {
+  if (typeof value !== "string" || !PULSE_TIMESTAMP_PATTERN.test(value)) return null;
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) return null;
+  // Date.parse normalizes impossible calendar dates; do not present those as evidence.
+  return new Date(milliseconds).toISOString().slice(0, 19) === value.slice(0, 19)
+    ? milliseconds : null;
+}
+
+function pulseTimestampLabel(value: unknown): string {
+  if (typeof value !== "string" || pulseTimestampValue(value) === null) return "an unknown time";
+  return `${value.slice(0, 10)} ${value.slice(11, 16)} UTC`;
+}
+
+function pulseCheckedLabel(checkedAt: unknown): string {
+  if (typeof checkedAt !== "string" || pulseTimestampValue(checkedAt) === null) {
+    return "check time unavailable";
+  }
+  return `checked ${checkedAt.slice(0, 10)} ${checkedAt.slice(11, 16)} UTC`;
+}
+
+/**
+ * Render the compact operator-reviewed public-pulse panel.
+ *
+ * One row per selected project: the catalogue name (or an explicit unmapped label), the probe
+ * state in words, and the sampled fraction with its denominator always printed. The fraction
+ * is never relabelled as time-weighted uptime, and CI health never enters this card, so the
+ * two availability claims cannot merge into one score. An expired capsule renders an expired
+ * panel instead of probe data.
+ */
+export function renderPulseCard(data: PulseCardData, options: PulseRenderOptions): string {
+  const nowMs = options?.nowMs;
+  const generatedAt = pulseTimestampValue(data.generatedAt);
+  const expiresAt = pulseTimestampValue(data.expiresAt);
+  const validBounds = Number.isSafeInteger(nowMs) && nowMs >= 0 && nowMs <= 8_640_000_000_000_000
+    && generatedAt !== null && expiresAt !== null && expiresAt > generatedAt && generatedAt <= nowMs;
+  const status = !validBounds ? "unavailable"
+    : data.status === "expired" || nowMs >= expiresAt! ? "expired"
+    : data.status === "live" ? "live" : "unavailable";
+  const validStates: readonly PulseProbeState[] = ["up", "down", "unknown", "stale"];
+  const rows = status === "live"
+    ? data.projects.filter((row) => String(row.id ?? "").trim() && validStates.includes(row.state))
+    : [];
+  const shown = rows.slice(0, PULSE_MAX_ROWS);
+  const totalRows = status === "live" ? data.projects.length : 0;
+  const unmapped = Number.isFinite(data.unmappedCount)
+    ? Math.max(0, Math.trunc(data.unmappedCount as number)) : 0;
+  const rowsHeight = Math.max(162, 96 + shown.length * 44 + 34);
+  const o = optionsFor(options, rowsHeight, "Public pulse",
+    "Operator-reviewed Pulseboard probe capsule. Sampled checks, not time-weighted uptime; CI health is shown separately.",
+    rowsHeight, 420);
+  const t = o.theme; const width = o.width;
+  const metadata = sourceMetadata(data.source, data.dataState, o.title, o.description);
+  const windowLabel = isValidIsoDate(data.windowStart) && isValidIsoDate(data.windowEnd)
+    ? `${data.windowStart} → ${data.windowEnd}` : null;
+  const rowSentence = (row: PulseProjectRow): string => {
+    const name = truncateText(String(row.displayName ?? "").trim() || "Unmapped project", 25);
+    const good = Math.trunc(finite(row.sampledGood));
+    const total = Math.trunc(finite(row.sampledTotal));
+    return `${name} (${truncateText(String(row.id), 30)}): ${pulseStateLabel(row.state)}, ` +
+      `${good}/${total} sampled checks, ${pulseCheckedLabel(row.checkedAt)}${total <= 0 ? ", no samples observed" : ""}.`;
+  };
+  const accessibleDescription = status === "unavailable"
+    ? `${metadata.description} Capsule time bounds or rendering time are unavailable. Probe states are not live evidence.`
+    : status === "expired"
+    ? `${metadata.description} Capsule generated ${pulseTimestampLabel(data.generatedAt)}; ` +
+      `expired at ${pulseTimestampLabel(data.expiresAt)}. Probe states are not live evidence.`
+    : `${metadata.description} Observed window ${windowLabel ?? "unavailable"}. ` +
+      `Generated ${pulseTimestampLabel(data.generatedAt)}; expires ${pulseTimestampLabel(data.expiresAt)}. ` +
+      `${shown.map(rowSentence).join(" ")}` +
+      `${totalRows > shown.length ? ` ${shown.length} of ${totalRows} selected projects shown.` : ""}` +
+      `${unmapped > 0 ? ` ${unmapped} of ${totalRows} selected projects have no catalogue mapping.` : ""}`;
+  let out = svgStart(width, o.height, t, metadata.title, metadata.description, accessibleDescription);
+  out += cardMotionStyle(options?.motion) + `<g class="card-enter">`;
+  out += panel(16, 16, width - 32, o.height - 32, t);
+  out += numeral(34, 48, 1, "PUBLIC PULSE", t);
+  out += sourceMarker(data.source, data.dataState, width - 34, 31, t);
+  if (windowLabel) out += mono(width - 34, 64, windowLabel, 10, t.muted, 500, "end", 0.04);
+  if (status !== "live") {
+    out += text(34, 100, status === "expired" ? "Pulse capsule expired" : "Pulse capsule unavailable", 16, t.muted, 700);
+    out += text(34, 122, truncateText(
+      status === "expired"
+        ? `Expired ${pulseTimestampLabel(data.expiresAt)}; probe states are not live evidence.`
+        : "Time bounds unavailable; probe states are not live evidence.",
+      width < 560 ? 52 : 80,
+    ), 12, t.muted);
+    return out + `</g>` + svgEnd();
+  }
+  if (!shown.length) {
+    out += text(34, 100, "No probe rows to display", 13, t.muted, 550);
+    return out + `</g>` + svgEnd();
+  }
+  if (totalRows > shown.length) out += text(width - 34, 82, `${shown.length} of ${totalRows} shown`, 11, t.muted, 500, "end");
+  shown.forEach((row, index) => {
+    const y = 100 + index * 44;
+    if (index > 0) out += `<line x1="34" y1="${y - 26}" x2="${width - 34}" y2="${y - 26}" stroke="${t.border}"/>`;
+    const name = String(row.displayName ?? "").trim() || "Unmapped project";
+    const good = Math.trunc(finite(row.sampledGood));
+    const total = Math.trunc(finite(row.sampledTotal));
+    out += text(34, y, truncateText(name, width < 560 ? 16 : 30), 13.5, t.text, 700);
+    out += mono(width - 34, y, `${good}/${total} sampled`, 11, t.muted, 600, "end", 0.04);
+    out += `<rect x="34" y="${y + 8}" width="8" height="8" fill="${pulseStateColor(row.state, t)}"/>`;
+    const detail = `${pulseStateLabel(row.state)} · ${truncateText(String(row.id), 40)} · ` +
+      `${pulseCheckedLabel(row.checkedAt)}${total <= 0 ? " · no samples observed" : ""}`;
+    out += mono(48, y + 15, width < 560 ? truncateText(detail, 52) : detail, 9.5, t.muted, 550, "start", 0.08);
+  });
+  const footer = [
+    unmapped > 0 ? `${unmapped} UNMAPPED` : null,
+    "SAMPLED CHECKS ARE NOT UPTIME",
+    "CI SHOWN SEPARATELY",
+  ].filter((part): part is string => part !== null).join(" · ");
+  out += mono(34, o.height - 26, width < 560 ? truncateText(footer, 54) : footer, 9.5, t.muted, 550, "start", 0.08);
+  return out + `</g>` + svgEnd();
+}
+
 /** Render the compact, source-labelled CommitAtlas overview card. */
 export function renderAtlasCard(data: AtlasCardData, options?: RenderOptions): string {
   const normalizedWidth = dimension(options?.width, 860, MIN_WIDTH, MAX_WIDTH);
   const narrow = normalizedWidth < 620;
-  const defaultHeight = narrow ? 570 : 380;
+  const defaultHeight = narrow ? 608 : 380;
   const o = optionsFor(
     { ...options, width: options?.width ?? 860 },
     defaultHeight,
@@ -1184,43 +1936,95 @@ export function renderAtlasCard(data: AtlasCardData, options?: RenderOptions): s
   const t = o.theme;
   const width = o.width;
   const height = o.height;
+  const days = displayCalendarDays(data.activity);
+  const calendar = calendarReading(days);
+  const heatmapTop = narrow ? 191 : 154;
+  const heatmapLeft = 24;
+  const heatmapWidth = narrow ? width - 48 : Math.floor(width * .61) - 34;
+  const grid = calendarGrid(days);
+  const columns = grid.columns;
+  const columnGap = 2;
+  const cell = Math.max(2, Math.min(7, Math.floor((heatmapWidth - Math.max(0, columns - 1) * columnGap) / columns)));
+  const heatmapActualWidth = columns * cell + Math.max(0, columns - 1) * columnGap;
+  const canMove = densityCardMotionEnabled(data, days);
+  const ambient = densityMotion({ kind: "atlas", namespace: calendarNamespace("atlas", days, width, t, options), backend: options?.motionBackend ?? "smil", columns, pitch: cell + columnGap, left: heatmapLeft, top: heatmapTop, height: 7 * (cell + 2) - 2, width: heatmapActualWidth, frameWidth: width, ink: t.chrome }, options?.motion === "ambient" && canMove);
   const name = truncateText(data.profile.name || data.profile.login || "GitHub user", narrow ? 22 : 30);
   const login = truncateText(String(data.profile.login ?? "").replace(/^@/, ""), 32);
-  const sourceLabel = data.source === "synthetic-demo" ? "SYNTHETIC PREVIEW"
-    : data.source === "public-profile" ? "PUBLIC PROFILE VIEW"
-      : "PUBLIC GITHUB";
+  const effectiveState = effectiveDataState(data.source, data.dataState);
+  const sourceLabel = effectiveState === "synthetic-demo" ? "SYNTHETIC PREVIEW"
+    : effectiveState === "partial" ? "PARTIAL SNAPSHOT"
+      : effectiveState === "stale" ? "STALE SNAPSHOT"
+        : effectiveState === "unavailable" ? "DATA UNAVAILABLE"
+          : data.source === "public-profile" ? "PUBLIC PROFILE VIEW"
+            : data.source === "public-github" ? "PUBLIC GITHUB" : "SOURCE UNKNOWN";
   const breakdownQualifier = data.breakdownBasis === "public-profile-percentages"
     ? "Public profile activity percentage mix from calendar-year views, not scoped to this contribution window"
     : "Breakdown";
   const currentStreakOpen = data.streakBoundary?.current === "open";
   // Window boundaries, the rhythm level, and the window length come from the caller, so bound and
   // clamp them here rather than trusting the adapter that normally supplies them.
-  const windowFrom = truncateText(data.window.from, MAX_WINDOW_LABEL_LENGTH);
-  const windowTo = truncateText(data.window.to, MAX_WINDOW_LABEL_LENGTH);
-  const windowDays = formatNumber(data.window.days, false);
+  // truncateText keeps a bad string. A window label is a date only when it is a real calendar day.
+  const windowFromKnown = isValidIsoDate(data.window.from);
+  const windowToKnown = isValidIsoDate(data.window.to);
+  const windowFrom = windowFromKnown ? truncateText(data.window.from, MAX_WINDOW_LABEL_LENGTH) : "unavailable";
+  const windowTo = windowToKnown ? truncateText(data.window.to, MAX_WINDOW_LABEL_LENGTH) : "unavailable";
+  // formatNumber maps a missing length to 0. The header and the description share this gate.
+  const windowDaysKnown = Number.isFinite(data.window.days);
+  const windowDays = windowDaysKnown ? formatNumber(data.window.days, false) : "";
+  const windowSpan = windowDaysKnown ? `${windowDays} days` : "an unavailable window";
   const rhythmLevel = truncateText(data.rhythm.level, MAX_RHYTHM_LEVEL_LENGTH);
   const currentStreakThrough = isValidIsoDate(data.currentStreakThrough) ? data.currentStreakThrough : null;
   const currentStreakLabel = currentStreakThrough && currentStreakThrough !== data.window.to
     ? `Streak to ${currentStreakThrough.slice(5)}`
     : "Current streak";
-  const accessibleDescription = `${o.description} ${formatNumber(data.total, false)} contributions across ${windowDays} days; ${formatNumber(data.activeDays, false)} active days; ${finite(data.density).toFixed(1).replace(/\.0$/, "")}% density; ${currentStreakOpen ? "at least " : ""}${formatNumber(data.currentStreak, false)} day current streak${currentStreakThrough ? ` through ${currentStreakThrough}` : ""} and ${formatNumber(data.longestStreak, false)} day longest streak in this window. Earlier streak history is not observed. ${breakdownQualifier}: ${atlasBreakdownValue(data.breakdown.commits, data.breakdownBasis)} commits, ${atlasBreakdownValue(data.breakdown.pullRequests, data.breakdownBasis)} pull requests, ${atlasBreakdownValue(data.breakdown.reviews, data.breakdownBasis)} reviews, and ${atlasBreakdownValue(data.breakdown.issues, data.breakdownBasis)} issues. Rhythm is a CommitAtlas consistency score, not a GitHub rank.`;
-  let out = svgStart(width, height, t, o.title, o.description, accessibleDescription);
-  out += atlasMotionStyle(options?.motion);
+  const contributionText = Number.isFinite(data.total)
+    ? `${formatNumber(data.total, false)} contributions`
+    : "Total unavailable";
+  const activeDayText = Number.isFinite(data.activeDays)
+    ? `${formatNumber(data.activeDays, false)} active days`
+    : "Active days unavailable";
+  const densityText = Number.isFinite(data.density)
+    ? `${finite(data.density).toFixed(1).replace(/\.0$/, "")}% density`
+    : "density unavailable";
+  const currentStreakText = Number.isFinite(data.currentStreak)
+    ? `${currentStreakOpen ? "at least " : ""}${formatNumber(data.currentStreak, false)} day current streak${currentStreakThrough ? ` through ${currentStreakThrough}` : ""}`
+    : "current streak unavailable";
+  const longestStreakText = Number.isFinite(data.longestStreak)
+    ? `${formatNumber(data.longestStreak, false)} day longest streak in the observed history`
+    : "longest streak unavailable";
+  const calendarSummary = calendar.total === null ? "Calendar summary unavailable" : `${formatNumber(calendar.total, false)} contributions, ${calendar.active} active days, ${calendar.density!.toFixed(1)}% active-day density, ${calendar.average!.toFixed(1)} average per observed day, peak ${formatNumber(calendar.peak!.count, false)} on ${calendar.peak!.date}`;
+  const accessibleDescription = `${o.description} Observed history ${windowFrom} to ${windowTo}: ${contributionText} across ${windowSpan}; ${activeDayText}; ${densityText}; ${currentStreakText} and ${longestStreakText}. Earlier streak history is not observed. ${breakdownQualifier}: ${atlasBreakdownValue(data.breakdown.commits, data.breakdownBasis)} commits, ${atlasBreakdownValue(data.breakdown.pullRequests, data.breakdownBasis)} pull requests, ${atlasBreakdownValue(data.breakdown.reviews, data.breakdownBasis)} reviews, and ${atlasBreakdownValue(data.breakdown.issues, data.breakdownBasis)} issues. Rhythm is a CommitAtlas consistency score, not a GitHub rank. Displayed calendar ${calendar.from} to ${calendar.to}, ${calendar.observed} observed days, at most the latest 365 calendar days: ${calendarSummary}. ${CONTRIBUTION_DENSITY_DESCRIPTION} Contributions by month, with exact day=count readings: ${calendar.compactDescription || "unavailable"}`;
+  const metadata = sourceMetadata(data.source, data.dataState, o.title, o.description);
+  const stateLead = sourceDescriptionLead(effectiveState);
+  const accessibleWithState = stateLead ? `${stateLead} ${accessibleDescription}` : accessibleDescription;
+  let out = svgStart(width, height, t, metadata.title, metadata.description, accessibleWithState);
+  out += (options?.motion === "ambient" || !canMove ? "" : atlasMotionStyle(options?.motion)) + ambient.compiled.style;
   out += `<rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="17" stroke="${t.border}"/>`;
   out += `<g class="atlas-enter"><circle cx="30" cy="32" r="16" fill="${t.accent}"/>`;
   out += text(30, 38, ([...name][0] ?? "?").toUpperCase(), 16, t.background, 800, "middle");
   out += text(56, 29, name, 18, t.text, 760) + text(56, 47, `@${login}`, 10, t.muted, 550);
-  out += text(width - 22, 28, sourceLabel, 9, data.source === "synthetic-demo" ? t.warning : t.positive, 700, "end");
-  out += text(width - 22, 45, `${windowDays}D · ${windowTo}`, 9, t.muted, 550, "end");
+  const sourceColor = effectiveState === "synthetic-demo" || effectiveState === "partial" || effectiveState === "stale"
+    ? t.warning
+    : effectiveState === "unavailable"
+      ? t.muted
+      : data.source === "public-github" || data.source === "public-profile" ? t.positive : t.muted;
+  out += text(width - 22, 28, sourceLabel, 9, sourceColor, 700, "end");
+  const windowHeader = windowDaysKnown
+    ? windowFromKnown && windowToKnown ? `OBSERVED HISTORY · ${windowDays}D` : "OBSERVED HISTORY · dates unavailable"
+    : windowToKnown ? `unavailable · ${windowTo}` : "unavailable";
+  out += text(width - 22, 45, windowHeader, 9, t.muted, 550, "end");
   out += `</g><line x1="22" y1="62" x2="${width - 22}" y2="62" stroke="${t.border}"/>`;
 
+  // Same rule as the streak totals and project tallies: a non-finite headline is unavailable.
+  // The label already names the stat, so the value stays the shared word rather than a new metric.
+  // A real zero still renders as zero.
   const metricValues = [
-    ["Contributions", formatNumber(data.total)],
-    ["Active days", formatNumber(data.activeDays, false)],
-    ["Density", `${finite(data.density).toFixed(1).replace(/\.0$/, "")}%`],
-    ["Average / day", finite(data.averagePerDay).toFixed(1)],
-    [currentStreakLabel, `${formatNumber(data.currentStreak, false)}${currentStreakOpen ? "+" : ""}d`],
-    ["Longest in window", `${formatNumber(data.longestStreak, false)}d`],
+    ["Contributions", Number.isFinite(data.total) ? formatNumber(data.total) : "unavailable"],
+    ["Active days", Number.isFinite(data.activeDays) ? formatNumber(data.activeDays, false) : "unavailable"],
+    ["Density", Number.isFinite(data.density) ? `${finite(data.density).toFixed(1).replace(/\.0$/, "")}%` : "unavailable"],
+    ["Average / day", Number.isFinite(data.averagePerDay) ? finite(data.averagePerDay).toFixed(1) : "unavailable"],
+    [currentStreakLabel, Number.isFinite(data.currentStreak) ? `${formatNumber(data.currentStreak, false)}${currentStreakOpen ? "+" : ""}d` : "unavailable"],
+    ["Longest in history", Number.isFinite(data.longestStreak) ? `${formatNumber(data.longestStreak, false)}d` : "unavailable"],
   ] as const;
   if (narrow) {
     const metricWidth = (width - 44) / 3;
@@ -1236,36 +2040,20 @@ export function renderAtlasCard(data: AtlasCardData, options?: RenderOptions): s
     out += `<line x1="22" y1="122" x2="${width - 22}" y2="122" stroke="${t.border}"/>`;
   }
 
-  const heatmapTop = narrow ? 191 : 154;
-  const heatmapLeft = 24;
-  const heatmapWidth = narrow ? width - 48 : Math.floor(width * .61) - 34;
-  const days = data.activity.filter((day) => isValidIsoDate(day.date)).sort((left, right) => left.date.localeCompare(right.date)).slice(-366);
-  const grid = calendarGrid(days);
-  const columns = grid.columns;
-  const cell = Math.max(3, Math.min(7, Math.floor((heatmapWidth - Math.max(0, columns - 1) * 2) / columns)));
-  const heatmapActualWidth = columns * cell + Math.max(0, columns - 1) * 2;
-  out += numeral(heatmapLeft, heatmapTop - 14, 1, "CONTRIBUTION DENSITY", t, 9);
-  out += mono(heatmapLeft + heatmapWidth, heatmapTop - 14, `${formatNumber(data.peakDay.count, false)} PEAK · ${truncateText(data.peakDay.date, 10)}`, 8.5, t.muted, 500, "end", 0.1);
-  const heatmapPaths = new Map<string, string[]>();
-  grid.cells.forEach(({ day, column, row }) => {
-    const level = Number.isFinite(day.level) ? Math.max(0, Math.min(4, Math.round(day.level as number))) : day.count > 0 ? 2 : 0;
-    const x = heatmapLeft + column * (cell + 2);
-    const y = heatmapTop + row * (cell + 2);
-    const fill = densityFill(level, t);
-    const paths = heatmapPaths.get(fill) ?? [];
-    paths.push(`M${x} ${y}h${cell}v${cell}H${x}Z`);
-    heatmapPaths.set(fill, paths);
-  });
-  out += [...heatmapPaths.entries()].map(([fill, paths]) => `<path class="atlas-cell" fill="${fill}" d="${paths.join("")}"/>`).join("");
+  out += numeral(heatmapLeft, heatmapTop - 14, 1, "CONTRIBUTION CALENDAR", t, 9);
+  const peakLabel = calendar.peak ? `${formatNumber(calendar.peak.count, false)} PEAK` : "peak unavailable";
+  out += mono(heatmapLeft + heatmapWidth, heatmapTop - 14, peakLabel, 8.5, t.muted, 500, "end", 0.1);
+  out += `<g aria-hidden="true">${renderContributionCells(grid.cells.map(({ day, column, row }) => ({ date: day.date, count: day.count, x: heatmapLeft + column * (cell + columnGap), y: heatmapTop + row * (cell + 2) })), cell, t, "atlas-cell")}</g>`;
+  out += ambient.fragment;
   const heatmapBottom = heatmapTop + 7 * (cell + 2);
-  out += mono(heatmapLeft, heatmapBottom + 13, windowFrom, 8, t.muted, 500, "start", 0.08);
-  out += mono(heatmapLeft + heatmapActualWidth, heatmapBottom + 13, windowTo, 8, t.muted, 500, "end", 0.08);
-  // The key sits under the grid it explains, so the ramp never needs to be inferred.
-  const densityKeyX = Math.max(heatmapLeft, heatmapLeft + heatmapActualWidth - 118);
-  out += `<g aria-hidden="true">${densityKey(densityKeyX, heatmapBottom + 22, t, 6)}</g>`;
+  out += mono(heatmapLeft, heatmapBottom + 11, calendar.from, 8, t.muted, 500, "start", 0.08);
+  out += mono(heatmapLeft + heatmapWidth, heatmapBottom + 11, calendar.to, 8, t.muted, 500, "end", 0.08);
+  const compactCalendarSummary = calendar.total === null ? "Calendar summary unavailable" : `${formatNumber(calendar.total)} total · ${calendar.active} active · ${calendar.density!.toFixed(1)}% · ${formatNumber(calendar.average!)} / day`;
+  out += mono(heatmapLeft, heatmapBottom + 25, compactCalendarSummary, 8, t.muted, 500, "start", 0);
+  out += densityKey(heatmapLeft, heatmapBottom + 35, heatmapWidth, t);
 
   const breakdownX = narrow ? 24 : Math.floor(width * .64);
-  const breakdownY = narrow ? 290 : 144;
+  const breakdownY = narrow ? 322 : 144;
   const breakdownWidth = width - breakdownX - 24;
   // One ink for all four rows. The bar's LENGTH is the variable, so its colour is free to stay
   // constant — and holding it constant is what stops this panel handing the reader a second,
@@ -1281,15 +2069,16 @@ export function renderAtlasCard(data: AtlasCardData, options?: RenderOptions): s
   breakdown.forEach(([label, value], index) => {
     const y = breakdownY + 18 + index * 24;
     const trackWidth = Math.max(1, breakdownWidth - 104);
-    // Divide before scaling: multiplying a huge finite value first can overflow to Infinity.
-    const barWidth = Math.max(2, trackWidth * (finite(value) / breakdownMax));
+    // A missing value keeps the track and skips the bar. A real zero still draws the 2px stub.
+    const valueKnown = Number.isFinite(value);
+    const barWidth = valueKnown ? Math.max(2, trackWidth * (finite(value) / breakdownMax)) : 0;
     out += mono(breakdownX, y + 8, label, 8.5, t.muted, 500, "start", 0.08);
     out += `<rect x="${breakdownX + 76}" y="${y + 1}" width="${trackWidth}" height="6" fill="${t.track}"/>`;
-    out += `<rect class="atlas-bar" x="${breakdownX + 76}" y="${y + 1}" width="${barWidth.toFixed(2)}" height="6" fill="${t.mixInk}"/>`;
+    if (valueKnown) out += `<rect class="atlas-bar" x="${breakdownX + 76}" y="${y + 1}" width="${barWidth.toFixed(2)}" height="6" fill="${t.mixInk}"/>`;
     out += mono(width - 24, y + 8, atlasBreakdownValue(value, data.breakdownBasis), 9, t.text, 600, "end", 0.04);
   });
 
-  const footerTop = narrow ? 408 : 282;
+  const footerTop = narrow ? 440 : 282;
   out += `<line x1="22" y1="${footerTop - 12}" x2="${width - 22}" y2="${footerTop - 12}" stroke="${t.border}"/>`;
   const trendX = 24;
   const trendWidth = narrow ? Math.floor((width - 60) * .58) : Math.floor(width * .34);
@@ -1302,24 +2091,41 @@ export function renderAtlasCard(data: AtlasCardData, options?: RenderOptions): s
   const trendGap = 3;
   const trendBarWidth = Math.max(3, (trendWidth - Math.max(0, trendBuckets.length - 1) * trendGap) / Math.max(1, trendBuckets.length));
   trendBuckets.forEach((value, index) => {
-    // Divide before scaling: multiplying a huge finite value first can overflow to Infinity.
+    // A missing bucket is not a measured stub. A real zero keeps the 2px bar.
+    if (!Number.isFinite(value)) return;
     const barHeight = Math.max(2, 22 * (finite(value) / trendMax));
     out += `<rect class="atlas-bar" x="${(trendX + index * (trendBarWidth + trendGap)).toFixed(2)}" y="${(trendBaseline - barHeight).toFixed(2)}" width="${trendBarWidth.toFixed(2)}" height="${barHeight.toFixed(2)}" rx="2" fill="${t.accent}"/>`;
   });
 
   const rhythmX = narrow ? trendX + trendWidth + 22 : Math.floor(width * .40);
+  // finite() maps a missing score to 0. The rhythm card already says unavailable; this footer must agree.
+  // A finite negative still clamps to 0. Values above 100 stay unclamped, as this footer already did.
+  const rhythmScoreKnown = Number.isFinite(data.rhythm.score);
   out += text(rhythmX, footerTop + 2, "RHYTHM", 10, t.muted, 700);
-  out += text(rhythmX, footerTop + 27, `${Math.round(finite(data.rhythm.score))}/100`, 23, t.text, 780);
-  out += mono(rhythmX, footerTop + 43, `${rhythmLevel.toUpperCase()} · PERSONAL CONSISTENCY`, 7.5, t.muted, 600, "start", 0.08);
+  out += text(rhythmX, footerTop + 27, rhythmScoreKnown ? `${Math.round(finite(data.rhythm.score))}/100` : "unavailable", rhythmScoreKnown ? 23 : 12, t.text, rhythmScoreKnown ? 780 : 700);
+  // The band is a function of the score, so it is withheld with it, as the evidence record withholds its band.
+  const rhythmBand = rhythmScoreKnown ? rhythmLevel.toUpperCase() : "UNAVAILABLE";
+  out += mono(rhythmX, footerTop + 43, rhythmBand, 7.5, t.muted, 600, "start", 0.08);
+  out += mono(rhythmX, footerTop + 54, "PERSONAL CONSISTENCY", 7.5, t.muted, 600, "start", 0.08);
 
   const detailX = narrow ? 24 : Math.floor(width * .60);
   const detailY = narrow ? footerTop + 78 : footerTop;
   const languages = (data.languages ?? []).slice(0, 3);
   out += text(detailX, detailY + 2, "PORTFOLIO SIGNALS", 10, t.muted, 700);
   out += languages.length > 0
-    ? text(detailX, detailY + 21, languages.map((language) => `${truncateText(language.name ?? language.language ?? "Other", 10)} ${finite(language.percentage).toFixed(0)}%`).join(" · "), 9, t.text, 550)
+    ? text(detailX, detailY + 21, languages.map((language) => {
+        const name = truncateText(language.name ?? language.language ?? "Other", 10);
+        const share = Number.isFinite(language.percentage) ? `${finite(language.percentage).toFixed(0)}%` : "unavailable";
+        return `${name} ${share}`;
+      }).join(" · "), 9, t.text, 550)
     : text(detailX, detailY + 21, "Languages unavailable", 9, t.muted, 550);
-  const profileSignal = `${formatNumber(data.profile.repositories, false)} repos · ${formatNumber(data.profile.followers)} followers${Number.isFinite(data.profile.stars) ? ` · ${formatNumber(data.profile.stars)} stars` : " · stars unavailable"}`;
+  const repositorySignal = Number.isFinite(data.profile.repositories)
+    ? `${formatNumber(data.profile.repositories, false)} repos`
+    : "repos unavailable";
+  const followerSignal = Number.isFinite(data.profile.followers)
+    ? `${formatNumber(data.profile.followers)} followers`
+    : "followers unavailable";
+  const profileSignal = `${repositorySignal} · ${followerSignal}${Number.isFinite(data.profile.stars) ? ` · ${formatNumber(data.profile.stars)} stars` : " · stars unavailable"}`;
   out += text(detailX, detailY + 37, profileSignal, 9, t.text, 550);
   const projectCounts = data.projects;
   // A non-finite or negative count is an unknown project signal. Never render it as a real tally,
@@ -1336,8 +2142,10 @@ export function renderAtlasCard(data: AtlasCardData, options?: RenderOptions): s
     : projectCountsKnown
       ? text(detailX, detailY + 53, `${finite(projectCounts.passing)}/${finite(projectCounts.total)} CI passing · ${finite(projectCounts.attention)} attention · ${finite(projectCounts.unavailable)} unavailable`, 9, finite(projectCounts.attention) > 0 ? t.warning : t.muted, 550)
       : text(detailX, detailY + 53, "Project health unavailable", 9, t.muted, 550);
-  out += text(width - 22, height - 10, `Generated ${truncateText(data.generatedAt, 25)} · longest streak is window-bounded · rhythm is not a GitHub rank`, 8, t.muted, 500, "end");
-  return out + svgEnd();
+  // pulseTimestampValue rejects a non-timestamp and an impossible calendar day. Do not print the raw string.
+  const generatedLabel = pulseTimestampValue(data.generatedAt) !== null ? truncateText(data.generatedAt, 25) : "unavailable";
+  out += text(width - 22, height - 10, `Generated ${generatedLabel} · longest streak is history-bounded · rhythm is not a GitHub rank`, 8, t.muted, 500, "end");
+  return finishDensityCard(out + svgEnd(), ambient);
 }
 
 export const renderProfile = renderProfileCard;
@@ -1345,6 +2153,40 @@ export const renderStreak = renderStreakCard;
 export const renderActivity = renderActivityCard;
 export const renderLanguages = renderLanguagesCard;
 export const renderProjectSignalBoard = renderProjectBoard;
+export const renderDelivery = renderDeliveryCard;
 export const renderContributionBreakdown = renderContributionBreakdownCard;
 export const renderRhythm = renderRhythmCard;
 export const renderAtlas = renderAtlasCard;
+
+
+/** Inspect the renderer's compiler and compatibility motion grammars, not browser playback.
+ * Unknown motion fails closed so a future renderer change must update its receipt contract too.
+ * No SVG bytes are changed, and multiple matching classes on one node count as one target.
+ */
+export function measureCardMotion(output: string, kind: string): {
+  readonly bytes: number; readonly animatedElements: number; readonly loopingGroups: number;
+} {
+  if (!["atlas", "profile", "streak", "activity", "breakdown", "rhythm", "languages", "projects"].includes(kind)) {
+    throw new Error("Unknown card motion contract");
+  }
+  const document = parseSceneXml(output);
+  if (document.root.name !== "svg") throw new Error("Card motion contract requires SVG");
+  if (document.nodes.some(node => /(?:animation|transition)/iu.test(node.attrs.style ?? ""))) throw new Error("Unsupported card motion contract or stylesheet");
+  const density = measureDensityMotion(document, kind);
+  if (density && density.counters.animatedElements > 0) return {
+    bytes: new TextEncoder().encode(output).length,
+    animatedElements: density.counters.animatedElements,
+    loopingGroups: density.counters.loopingGroups,
+  };
+  const styles = document.nodes.filter(node => node.name === "style");
+  const expectedStyle = kind === "atlas" ? atlasMotionStyle("subtle") : cardMotionStyle("subtle");
+  if (styles.length > 1 || styles.some(node => node.raw !== expectedStyle) ||
+      document.nodes.some(node => /^(?:animate|set)/u.test(node.name) ||
+        /(?:animation|transition)/iu.test(node.attrs.style ?? ""))) {
+    throw new Error("Unsupported card motion contract or stylesheet");
+  }
+  const targets = new Set(kind === "atlas" ? ["atlas-enter", "atlas-bar", "atlas-cell"] : ["card-enter"]);
+  const animatedElements = styles.length === 0 ? 0 : document.nodes.filter(node =>
+    (node.attrs.class ?? "").split(/\s+/u).some(name => targets.has(name))).length;
+  return { bytes: new TextEncoder().encode(output).length, animatedElements, loopingGroups: 0 };
+}

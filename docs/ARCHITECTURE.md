@@ -22,7 +22,7 @@ GitHub public evidence ──┼─ interactive HTML Studio
 
 | Surface | Purpose | Delivery |
 | --- | --- | --- |
-| Atlas | 365-day density, heatmap, streaks, activity mix, momentum, rhythm, languages, project health | SVG + Studio |
+| Atlas | Up-to-two-year density (7–730 days or `auto`), heatmap, streaks, activity mix, momentum, rhythm, languages, project health | SVG + Studio |
 | Profile | Public repositories, stars, followers, following, contribution total | SVG + JSON |
 | Streak | Current and longest streak inside the exact displayed UTC window | SVG + JSON |
 | Breakdown | Exact categorized counts when available; otherwise non-window-scoped profile-view percentages | SVG + Studio |
@@ -32,6 +32,7 @@ GitHub public evidence ──┼─ interactive HTML Studio
 | Projects | Explicit lifecycle, named-workflow CI, release, freshness, and configured actions | SVG summary + HTML actions + JSON |
 | Cadence | UTC weekday contribution share and busiest day | Static SVG |
 | Releases | Latest published releases across curated projects | Static SVG |
+| Delivery | Pull-request flow across configured public repositories, labelled as activity flow rather than quality or impact | Static SVG + JSON; opt-in |
 | Studio | Configure, preview, copy Markdown, and inspect source/freshness | HTML |
 
 An external SVG embedded in a README is one image link. Internal pseudo-buttons are not a reliable
@@ -48,6 +49,10 @@ Install, Download, Release, and CI actions remain keyboard-accessible HTML.
 - Optional hosted token-backed contributions use GitHub GraphQL only after positive public-only
   classic-token scope evidence. Restricted contributions and broader/unknown credential types fail
   closed.
+- Opt-in static Delivery collection uses a separate authenticated GraphQL request for aggregate
+  pull-request counts. Every search names the configured public repositories owned by the user;
+  the same response must affirm public visibility for every repository. The collector requests no
+  pull-request titles, bodies, comments, branches, commit content, or reviewer identities.
 - CI reads only the exact workflow configured for each project. Lifecycle and action URLs are owner
   declarations, never guesses derived from repository age or popularity.
 
@@ -59,8 +64,10 @@ details through that path.
 
 - Query parameters and config fields are allowlisted, length-bounded, canonicalized, and versioned.
 - Outbound requests target GitHub hosts only. Manifest links are validated but never fetched.
-- Tokens are server-side only and are never accepted in URLs, Studio state, static config, Action
-  inputs, fixtures, manifests, or generated SVGs.
+- Tokens are server/runner inputs, never URLs, Studio state, static config, fixtures, manifests, or
+  generated SVGs. The Action's optional `github-token` input and the static process's `GITHUB_TOKEN`
+  environment lookup are used only for opt-in Delivery collection; ordinary static collection
+  remains credential-free.
 - Token-backed public routes require positive public-only proof before resource lookup, reject
   private repository responses, and reject restricted contribution collections.
 - Every GitHub text field is role-bounded before it reaches a snapshot or renderer. Invalid optional
@@ -70,13 +77,31 @@ details through that path.
 - Missing, partial, gapped, stale, restricted, and unavailable evidence is never silently rewritten
   as zero or passing.
 - A GitHub `403` becomes `github_rate_limited` only with a valid `Retry-After`, exhausted
-  `x-ratelimit-remaining`, or an explicit rate-limit/abuse message. Other 403s are unavailable:
+  `x-ratelimit-remaining`, or an explicit rate-limit/abuse message. Other 403s are `github_forbidden`:
   optional project signals degrade locally, while required lookups return the bounded 502 contract.
   Project snapshots carry `releaseState` (`published`, `none`, or `unavailable`) so a refused release
   lookup can never be rendered or counted as an observed absence.
 - The rhythm score is a documented within-window consistency summary, not a universal developer rank.
 
 ## Hosted delivery and caching
+
+API errors retain the v1 envelope:
+`{ version: 1, status: "error", error: { code, message }, generatedAt }`.
+Messages describe the failure without copying upstream bodies or transport exceptions.
+The typed `GitHubApiError.code` union is the shared client contract; Studio displays the safe message.
+
+| Code | HTTP status | Meaning |
+| --- | --- | --- |
+| `github_timeout` | 502 | The shared 12-second request deadline expired, including body reads. |
+| `github_auth_required` | 502 | GitHub returned 401 or a GraphQL authentication-required error. This concerns server credentials, not the visitor. |
+| `github_forbidden` | 502 | GitHub returned a non-rate-limit 403 or a GraphQL permission error. |
+| `github_rate_limited` | 429 | A primary or secondary quota refusal, including GraphQL payload errors; validated retry guidance is provided. |
+| `github_unavailable` | 502 | An upstream 5xx, immediate network/read failure, or unclassified GraphQL failure. It does not imply a deadline expired. |
+| `github_not_found` | 404 | No matching public resource; private and missing resources remain indistinguishable. |
+
+Credential preflight HTTP failures use the same classification. A successful preflight that lacks
+explicit public-only scope proof still fails closed as `private_data`. Optional project 403s stay
+local unavailable signals; later profile-page deadline failures still produce partial totals.
 
 The hosted service is best-effort and cache-first. Public responses use canonical cache keys and
 bounded edge lifetimes; private/token responses use `no-store`. Stable ETags support conditional
@@ -89,8 +114,9 @@ repository, lifecycle, and workflow choices cannot collide or leak across respon
 requests, token-backed requests, invalid input, not-found answers, and malformed upstream data are
 never written or served from this layer.
 
-Entries expire after seven days. When anonymous GitHub later produces a supported quota (`429`) or
-availability (`502`) error, a valid entry is returned with `X-CommitAtlas-Data-State: stale`, its
+Entries expire seven days after storage or the latest matching validation. When anonymous GitHub
+later produces `github_rate_limited`, `github_timeout`, `github_auth_required`, `github_forbidden`,
+or `github_unavailable`, a valid entry is returned with `X-CommitAtlas-Data-State: stale`, its
 stored and observed timestamps, a short cache lifetime, and an HTTP stale warning. SVG responses
 also receive a high-contrast `STALE SNAPSHOT` strip below the original view box content and add the
 same warning to the accessible description. Versioned JSON bodies preserve their observed values
@@ -99,9 +125,11 @@ cross-key lookup retains the original bounded error.
 
 A matching public `304 Not Modified` is also useful evidence: GitHub has confirmed that the
 canonical representation is still current even though it did not resend the body. CommitAtlas
-therefore refreshes that entry's KV retention through `ctx.waitUntil()`, but only when the request,
-response, canonical key, and stored weak ETag all agree. The stored and observed timestamps are
-preserved because no body was newly observed. Missing, expired, malformed, or mismatched entries
+therefore refreshes that entry's KV retention and separate `validatedAt` timestamp through
+`ctx.waitUntil()`, but only when the request, response, canonical key, and stored weak ETag all
+agree. The parser uses validation time for retention eligibility; entries without it use `storedAt`.
+The stored and observed timestamps (including stale age headers) are preserved because no body
+was newly observed. Missing, expired, malformed, or mismatched entries
 are not revived, and a KV read or write failure cannot replace the original `304`.
 
 KV is eventually consistent, so a just-primed value may take time to become visible in another
@@ -116,21 +144,43 @@ in HTML.
 
 ## Static delivery
 
-The static package reads one tracked `.commitatlas.json`, fetches public data without a credential,
-builds one `PortfolioSnapshot`, and renders a selected subset of ten cards. The primary output and
-each optional `themes` entry have an independent v1 `manifest.json` with byte sizes and SHA-256
-hashes. Repository-contained path and symlink checks run for every output before any write. Every
-variant is rendered and validated from the same snapshot before staged per-file replacement;
-unrelated siblings survive while stale files from the bounded set of CommitAtlas-managed artifact
-names are removed only inside the directory whose prior manifest recorded ownership. When
-`responsiveAtlas` is enabled, the same snapshot also renders the alternate Atlas layout into that
-directory's manifest, so responsive and dark/light consumers never compare independently fetched
-datasets.
+The static package reads one tracked `.commitatlas.json`, fetches a credential-free public
+`PortfolioSnapshot`, and renders selected cards and registry scenes. There are eleven selectable
+cards: the original ten remain credential-free and are the default selection; `delivery` is opt-in.
+When Delivery is selected, [the generator](../packages/static/src/generate.ts) also collects a
+scoped `DeliverySnapshot`, using an explicit programmatic token or the `GITHUB_TOKEN` environment
+variable. That token is not passed to the ordinary portfolio client. Delivery's scope and date must
+match the configured public projects and portfolio window before rendering.
 
-The root Node 24 Action calls that package and returns generated paths. It does not commit, push,
-upload, deploy, or receive `GITHUB_TOKEN`. A consumer workflow owns publication and can preserve the
-last known-good committed cards when refresh fails. See
-[STATIC_GENERATOR_PLAN.md](./STATIC_GENERATOR_PLAN.md) for the exact contract.
+The primary output and each optional `themes` entry have an independent v1 `manifest.json` with
+artifact byte sizes and SHA-256 hashes. Every variant is rendered and validated from the same
+observations before publication. Selecting Delivery adds `delivery.svg` and the same deterministic
+`delivery.json` to each theme. Ordinary generation leaves the external benchmark unavailable;
+verified references remain separate work under #245. When `responsiveAtlas` is enabled, the same
+portfolio snapshot also renders the alternate Atlas layout into that directory's manifest, so
+responsive and dark/light consumers do not compare independently fetched datasets.
+
+Repository containment and symlink checks run before staging. All themes then pass checks on
+selected destinations and stale files before any stale deletion or selected-output replacement.
+Stale cleanup requires a prior v1 manifest naming CommitAtlas as the writer, a valid size/digest
+entry, and a current regular file with one link whose actual size and SHA-256 match that entry.
+For files eligible for cleanup, changed contents, directories, symlinks, hard links and other special
+entries stop publication at preflight; an already-missing stale file is harmless. Cleanup stays
+within the bounded managed names in the directory whose manifest recorded them.
+
+Legacy name-only entries and missing or invalid integrity metadata leave stale files in place for
+manual review. Missing, foreign or unreadable manifests, and manifests with duplicate artifact paths,
+disable cleanup entirely. Selected artifacts retain their overwrite contract, so these stale-file
+checks do not protect edits to an artifact that remains selected. The v1 writer still uses a
+path-based rename/unlink sequence: changes after preflight can race publication, and neither
+concurrent-writer isolation nor crash-atomic publication is provided. The test-only v2 store remains
+inactive; #256 tracks that work.
+
+The [Node 24 Action](../action/src/index.ts) calls the same generator, accepts the optional
+`github-token` input for Delivery, and returns generated paths. It does not commit, push, upload or
+deploy. A consumer workflow owns publication and can preserve the last known-good committed assets
+when refresh fails. See the [static package contract](../packages/static/README.md) and
+[STATIC_GENERATOR_PLAN.md](./STATIC_GENERATOR_PLAN.md).
 
 ## Optional Developer Lens research bridge
 
@@ -149,17 +199,105 @@ real-repository validation, or production monitoring. A future method trial must
 versioned producer artifact and update the pinned consumer deliberately; silent semantic drift
 fails closed.
 
-## Planned expansion (not shipped)
+## Optional Developer Lens projection reader
 
-The accepted programme in [EXPANSION_PLAN.md](./EXPANSION_PLAN.md) extends this architecture in
-three additive steps: a `none | subtle | ambient | cinematic` motion model compiled to CSS or SMIL
-by a backend chosen from measured github.com behaviour; a scene engine in `@commit-atlas/svg`
-(primitives, seeded determinism, budgets, a per-scene contract test harness) feeding new
-`/api/v1/scenes/<id>.svg` routes and `scene-<id>.svg` static artifacts; and two validated,
-fail-closed projections — `PublicLensProjection.v1` from Developer Lens and
-`ResearchFindingProjection.v1` exported by Developer Lens Lab into a Developer Lens-owned schema — specified in
-[PROJECTION_CONTRACTS.md](./PROJECTION_CONTRACTS.md). Until a slice ships, everything above this
-heading remains the complete description of the product.
+The separate `PublicLensProjection.v1` reader pins Developer Lens's published strict runtime and
+C0 showcase fixture at `bae3bddf7295b767d57196887bd648ba1cfe2ab3`; the fixture-file hash is checked
+independently of its canonical projection hash and its synthetic input-generator commit. The core
+parser validates exact producer fields, warning text, count-consistent percent scores, delivery,
+privacy and canonical hash, then rejects future timestamps and snapshot-name alias collisions.
+The optional static `lens: { path, maxAgeDays }` config reads only a Git-tracked, contained regular
+file with no symlink component and a 256 KiB cap. A configured invalid artifact fails before writes;
+legacy configs preserve their output. Hosted adapters accept no projection input and expose only
+the vendored fixture under explicit `demo=true` with a synthetic snapshot.
+
+The scene context carries complete validated C0 data and snapshot-clock freshness. Signature scenes
+receive an engine-owned stale strip plus accessible age; expired signatures render unavailable
+before model construction. The registered `signature` scene consumes this complete context from
+the static source, with exact axes and archetype, a neutral derived coverage track, and all warnings,
+privacy and freshness. It has no hosted endpoint or Studio selection. The transport parser accepts
+C1 contract semantics, but all publication adapters currently reject C1 under the operative Q-9 No policy recorded in #170. No real
+projection or private input is a fixture, log message or CommitAtlas tracked file. See
+[PROJECTION_CONTRACTS.md](./PROJECTION_CONTRACTS.md) for the pin, limitations and integration boundary.
+
+The existing Evidence Coverage instrument uses a complete Lens context to append a visibly
+synthetic derived score, age/state and every supplied registry warning. These text-only rows stay
+neutral and never create observed counts, coverage bars or scan targets. Stale/expired scores are
+labelled as historical while independent GitHub rows retain their own validity. Absent or legacy
+common context leaves the original seven-row output unchanged; an unavailable root snapshot
+withholds the Lens section. [EVIDENCE_COVERAGE_SCENE.md](./EVIDENCE_COVERAGE_SCENE.md) records the
+display contract, layout bounds and paired static-output tests.
+
+## Motion and scene delivery
+
+`@commit-atlas/svg` exports the `MotionPlan` compiler with CSS and SMIL backends and the
+[scene engine](../packages/svg/src/scene.ts). Scenes declare their family, supported packs and
+motion profiles, model builder, renderer, and accessibility text. The engine derives deterministic
+model seeds, scopes generated identifiers, validates SVG and accessibility output, and enforces
+byte, animated-element, and looping-group budgets. Unavailable models render an explicit still
+composition.
+
+The package and static config accept `none | subtle | ambient | cinematic`; hosted routes and the
+Studio accept `none | subtle | ambient`. Each scene further restricts those choices through its
+capability declaration. Existing cards retain their compatibility motion; compiler adoption for
+the Atlas and standalone cards remains #126/#127. Scene profiles already select different motion
+primitives. Renderer metadata determines whether SVG CSP permits inline presentation styles.
+
+The [registry](../packages/svg/src/scene.ts) contains seven built-ins. The
+[hosted catalogue](../lib/hosted-scene-catalog.ts) exposes the first four through
+`/api/v1/scenes/<id>.svg`:
+
+| Scene | Delivery | Supported motion |
+| --- | --- | --- |
+| `evidence-coverage` | Hosted + static/Action | `none`, `subtle`, `ambient` |
+| `activity-terrain` | Hosted + static/Action | `none`, `subtle`, `ambient` |
+| `chronograph` | Hosted + static/Action | `none`, `subtle`, `ambient` |
+| `lifecycle-map` | Hosted + static/Action | `none`, `subtle`, `ambient` |
+| `identity-beacon` | Static/Action; validated `identity` required | `none`, `ambient`, `cinematic` |
+| `nebula` | Static/Action | `none`, `ambient` |
+| `signature` | Static/Action; complete validated C0 `lens` required | `none`, `ambient` |
+
+Every built-in currently supports only `survey`. The
+[pack implementation](../packages/svg/src/packs.ts) defines `survey`, `orbital`, `spectral`, and
+`terminal` frame geometry, but broader scene/pack adoption remains open under #111. Unsupported
+scene/pack or scene/motion combinations are rejected. Static configuration selects registry scenes;
+the [static renderer](../packages/static/src/render.ts) produces `scene-<id>.svg` artifacts for
+inclusion in each theme's manifest, and the Action reports generated paths through its `scenes`
+output.
+
+The [Signature guide](./SIGNATURE_SCENE.md) records its static-first composition, rebuilt Action delivery and
+[direct-browser evidence scope](./evidence/appearance-2026-10-26/README.md). Its Gallery evidence stays derived for historical
+output, with a separate stale state. Its source registration does not widen the four-scene hosted
+catalogue or authorize C1/profile publication under Q-9 No.
+
+Studio card and scene previews share [bounded SVG loading](../app/studio/studio-svg-preview.tsx),
+approval tied to the actual decoded image, and reversible global/per-image Replay, Reduced-motion
+and Frame-zero tools. The latter two load `motion=none` twins. Renderer counters describe the loaded
+SVG's bytes, animated elements and looping groups; they do not measure browser playback. A still
+twin cannot approve an unseen animated configuration for Markdown.
+
+## Remaining programme and qualification
+
+The [backend defaults and budget classes](../packages/svg/src/motion/profile.ts) remain explicitly
+provisional. The complete browser/host/embed matrix (#113, with #180's WebKit diagnostic) and
+measured render-cost budgets (#114) remain open. #141 retains production and README round-trip
+qualification. Identity Beacon's bounded text layout and direct-image playback (#134) are qualified
+by [864 geometry cases and 20 CSS/SMIL rows](./IDENTITY_BEACON_EVIDENCE.md), including explicit
+picture/none reduced-motion twins. Its one-shot introduction and delayed 12-second beam cycle
+remain distinct from the original proposal to repeat the complete introduction. The 0/2/6-second
+observations do not qualify a 45-second termination boundary or direct-CSS reduced-motion image
+behavior. Chronograph's Unicode
+layout and CSS/SMIL playback acceptance (#344) is complete: the
+[source-bound receipt](./CHRONOGRAPH_EVIDENCE.md) records 576 browser-measured layouts, six
+playback/control rows and the 46-second return to the canonical still reading. That qualification
+does not complete the separate GitHub raw/Camo matrix or Phase 1.
+
+The C0 `PublicLensProjection.v1` reader is implemented as described above; C1 publication remains
+disabled. The `ResearchFindingProjection.v1` consumer (#154) remains planned and its scene adapter
+is unavailable. The gallery continues to use the WB-C1 method-trial bridge. [PROJECTION_CONTRACTS.md](./PROJECTION_CONTRACTS.md) records the consumer boundaries;
+implementations must pin the published producer schemas and fixtures. Remaining scenes, broader
+pack support, and unanswered owner decisions stay in
+[EXPANSION_PLAN.md](./EXPANSION_PLAN.md) and #111. C1 profile publication remains gated by #170.
 
 ## Project configuration
 

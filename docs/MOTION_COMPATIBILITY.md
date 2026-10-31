@@ -1,7 +1,9 @@
 # Motion compatibility evidence
 
-Status: Phase 0 issue #113 is parked at the three-attempt ceiling on the WebKit hosted-discovery
-blocker tracked in [#180](https://github.com/Chris0Jeky/CommitAtlas/issues/180). This ledger records
+Status: Phase 0 issue #113 remains parked behind the WebKit hosted-capture gate in
+[#180](https://github.com/Chris0Jeky/CommitAtlas/issues/180). The latest metadata observation and
+bounded seven-row run below establish three completed raw rows, followed by a Camo timing failure.
+The seven-row gate is incomplete. This ledger records
 measured outcomes only; an unfilled cell is **not tested**, never a compatibility claim. The fixture
 set and local capture tool live in
 [`tests/fixtures/motion-probes/`](../tests/fixtures/motion-probes/). The public synthetic scratch
@@ -9,6 +11,98 @@ repository for the GitHub/Camo part of the protocol is
 [Chris0Jeky/commitatlas-motion-probes](https://github.com/Chris0Jeky/commitatlas-motion-probes),
 currently pinned for the complete hosted capture at
 `039a0370b1a52fb6135e4414e04a11bff7ba21d0`.
+
+## WebKit layout observation and bounded repair — 2026-10-26
+
+The read-only [metadata run](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40264555209)
+at `907e38f96182acabb447cd2944f7da8bea3fc450` used Playwright 1.57.0 and observed WebKit 26.0.
+The exact first selector, `img[alt="css-enter"]`, retained its full raw commit pin and followed a
+302 redirect to a 200 SVG. The browser-selected final body, tracked fixture and matching Worker
+body all had SHA-256 `85547254f52197d041123066c90d5df84d259dde67c9502473ce247a71c03945`.
+All three snapshots showed natural `400x133` and rendered `400x133.328125` dimensions. None of
+the 20 recorded ancestors was hidden or zero-sized. **The September 25 zero-width failure was
+not reproduced, and its cause remains unproven.**
+
+The observation did expose a separate lifecycle seam: the initial selector resolved one DOM node
+before the containing `react-app` had class `loaded`; after document completion and two animation
+frames, the same selector resolved a replacement node and the app had acquired `loaded`.
+The compact [layout receipt](../tests/fixtures/motion-probes/evidence/2026-10-26-webkit-layout.json)
+retains node identities, timings, source identity, geometry and artifact hashes. This run made no
+screenshots, recordings or motion judgments.
+
+The bounded repair waits for that containing app marker before selecting and scrolling the target.
+It does not wait for window load, since the measured image remains request-gated. Discovery checks
+the final browser response against the exact local fixture SHA-256 before any recording row. The
+synthetic natural and rendered sizes must be finite, positive, at most the `720x480` viewport, and
+satisfy `abs(width - 3 * height) <= 1`; the one-pixel allowance records the observed integer sizing,
+while the SVG body's exact hash retains fixture identity. Wrong URLs, wrong probes, non-SVG bodies
+and different fixture bytes still fail. Each recording row repeats body hashing after its
+timing-critical frames and must match the same discovery fixture hash before the row is accepted;
+that final check does not add work inside the early motion observation window. Captures retain the timed-node guard through decode,
+each screenshot and final metadata, and each finite positive clip must fit inside the viewport.
+
+Focused local tests cover the sizing/hash/clip boundaries and use an existing Chromium executable
+with synthetic HTML to reproduce replacement during hydration, reject hidden ancestors and later
+timed-node replacement, and prove that readiness can complete while the image request is held.
+These local tests do not verify WebKit playback. The hosted result below is the runtime evidence.
+
+## Bounded seven-row WebKit result — 2026-10-26
+
+The one authorized [seven-row run](https://github.com/Chris0Jeky/CommitAtlas/actions/runs/40265885569)
+at reviewed head `662097de1cf7d581055de0e39286c483df76e76a` accepted all seven discovery identities
+and completed three GitHub-raw rows in WebKit 26.0 / Playwright 1.57.0. Both `css-enter` embeds
+animated; the reduced-motion picture selected the pinned static control and all four pixel pairs
+were `0/0`. Each completed row retained five load-relative frames, the exact fixture body and
+request gate, and a hashed WebM with more than five seconds of browser-visible time. All 15 PNG
+hashes and pixel differences and all three WebM hashes/sizes/magic were independently recomputed
+from the downloaded artifact. WebM container duration was not parsed.
+
+The run then failed closed on the first Camo row: the 250 ms CSS-enter sample reported completion
+at `447.0 ms`, beyond the unchanged `440 ms` limit. No Camo row or positive-control recording
+verdict was accepted, and no retry ran. The report's completion timestamp includes the screenshot
+API's file write, a same-node check, and a separate browser clock read; it does not isolate the
+instant at which raster capture finished. This observation does not justify relaxing the deadline
+or accepting the rejected frame.
+
+The compact [partial diagnostic receipt](../tests/fixtures/motion-probes/evidence/2026-10-26-webkit-diagnostic.json)
+records all seven discovery identities, all three completed rows, actual frame timing and pixel
+pairs, artifact hashes and the rejected-row limit. The original full-plan completion validator
+correctly rejects the partial report. The sizing and hydration repairs now have raw-path runtime
+evidence, but **#180 and #113 remain open**. The unfiltered three-engine matrix stays locked.
+The next source-only follow-up should separate screenshot completion observations from file I/O
+and post-check overhead, combine same-node and clock reads, and retain structured failed-row
+timing. Keep the 250/440 ms policy and source, body, geometry and node guards unchanged before
+considering another separately reviewed bounded run.
+
+### Separate source-only timing follow-up
+
+The timing follow-up returns screenshot bytes in memory before writing a PNG. It reads the
+same-node marker, viewport geometry and browser clock together immediately before the screenshot
+and at the first check after screenshot bytes return. The latter observation remains a
+conservative upper bound on capture completion: it includes the outbound and scheduling delay
+until that first browser check executes, and excludes the response's return to Node. It is not an
+exact compositor timestamp. Node-clock durations separately record the screenshot call, the
+full post-capture check round trip (including response return), and file writing. The unchanged 250 ms sample is rejected if the unrounded
+post-screenshot browser observation exceeds 440 ms. A later file write does not alter that
+observation, although earlier I/O can still delay the next sample and cause it to fail.
+
+Rejected rows remain outside `rows` and now retain a structured `failedRow`: exact planned identity,
+engine/version, request gate, completed frames, active failed-frame timing, before/after node and
+geometry observations, file-save state and the rejection phase. Discovery and final body checks,
+hydration readiness, positive viewport bounds and same-node guards remain in force. A late PNG
+may be saved as diagnostic evidence, without accepting its row.
+
+The same diagnostic boundary covers directory/context/gate/page setup, context teardown and video
+path/rename/inspection. Cleanup failures are recorded separately and cannot replace an earlier
+capture error. Available completed frames and video metadata remain attached to the failed row;
+the row enters `rows` only after teardown and video finalization succeed.
+
+The local synthetic-browser timing regression injects a 250 ms file write after screenshot bytes
+return, exercises an actually late browser-clock observation, and replaces the target immediately
+after a real screenshot. It verifies separate I/O timing, unchanged deadline rejection, retained
+failure metadata and continued node-replacement rejection. This is Chromium source verification;
+the follow-up has not run another WebKit/GitHub capture and does not change the rejected 447 ms
+result or unlock #113.
 
 ## Answer first — 2026-08-29 checkpoint
 
@@ -54,29 +148,34 @@ node tests/motion-probes/capture.mjs --browser 'C:\Program Files\Google\Chrome\A
 capture CLIs require a platform-native absolute path and reject an existing directory before
 launching a browser or creating screenshots, recordings, or browser profiles.
 For a deployed Worker (or another authorized public synthetic host), pass its bare HTTPS asset
-directory and a short host label. The page remains the local wrapper, while each image source is
-resolved against the encoded `assetBase` query value; the report repeats the exact `assetBase` and
-`hostLabel` values in its top-level metadata and rows:
+directory and a short host label through the pinned Playwright API. Hosted mode requires this path
+so the harness can intercept the browser's own asset request, hash the exact body it fulfills, and
+bind that observation to the screenshots. The page remains the local wrapper, while each image
+source is resolved against the encoded `assetBase` query value; the report repeats the exact
+`assetBase` and `hostLabel` values in its top-level metadata and rows:
 
 ```powershell
-node tests/motion-probes/capture.mjs --browser 'C:\Program Files\Google\Chrome\Application\chrome.exe' --asset-base 'https://example.invalid/api/v1/probes/motion/' --host-label worker-direct --out C:\temp\commitatlas-motion-worker
+$playwrightCli = $env:COMMITATLAS_PLAYWRIGHT_CLI
+node tests/motion-probes/capture.mjs --playwright-cli $playwrightCli --playwright-engine chromium --asset-base 'https://example.invalid/api/v1/probes/motion/' --host-label worker-direct --out C:\temp\commitatlas-motion-worker
 ```
 
 `--asset-base` must be an absolute HTTPS URL ending in `/` with no credentials, query, or fragment.
+It is rejected without both `--playwright-engine` and the pinned `--playwright-cli`; a native
+browser screenshot cannot expose the exact response body that produced its pixels.
 `--host-label` is an ASCII label of at most 64 letters, numbers, `.`, `_`, or `-`; it defaults to
 `local-direct`. Do not pass private URLs, tokens, or user data.
 
-The cached Playwright 1.57.0 runner can instead be passed through `--playwright-engine` and
-`--playwright-cli`. On Windows, `--playwright-cli` must name the package's `cli.js`, never its
-`.cmd` launcher; the harness rejects the latter before starting a browser. This permits
-Firefox/WebKit capture and `--reduced-motion` without changing `package.json` or `package-lock.json`.
-Capture artifacts are deliberately untracked; their compact, dated pixel evidence is committed in
+The cached Playwright 1.57.0 runner is required for hosted capture and can also be passed for local
+Firefox/WebKit capture and `--reduced-motion` without changing `package.json` or
+`package-lock.json`. On Windows, `--playwright-cli` must name the package's `cli.js`, never its
+`.cmd` launcher; the harness rejects the latter before starting a browser. Capture artifacts are
+deliberately untracked; their compact, dated pixel evidence is committed in
 [`2026-08-29-local-direct.json`](../tests/fixtures/motion-probes/evidence/2026-08-29-local-direct.json).
 
 Add `--record-video` to make each direct row one continuous Playwright context with a five-second
 WebM as well as the five PNG deadlines. Recording requires the supplied Playwright API path and an
-engine; the non-recording browser and CLI workflows above remain unchanged. The report verifies
-WebM magic, byte size, and SHA-256. `measuredVisibleDurationMs` is browser time, not a parsed media
+engine; local non-hosted browser and CLI workflows remain unchanged. The report verifies WebM
+magic, byte size, and SHA-256. `measuredVisibleDurationMs` is browser time, not a parsed media
 duration, and the report states that boundary explicitly. Set
 `COMMITATLAS_PLAYWRIGHT_CLI` to the pinned Playwright package's absolute `cli.js` path, then run:
 
@@ -89,7 +188,7 @@ The pinned GitHub-page harness measures both repository-relative GitHub-raw imag
 Worker images rewritten through Camo. It first discovers the exact selected URL for each
 engine/media/selector. Every measured row then gets a fresh context with service workers blocked;
 the harness gates that exact request until the target load timestamp is armed, records a continuous
-WebM, and takes element PNGs at absolute 0, 250, 500, 2,000, and 5,000 ms deadlines from image load.
+WebM, and takes viewport-clipped PNGs at absolute 0, 250, 500, 2,000, and 5,000 ms deadlines from image load.
 Response body hashing happens after those timing-critical frames. It writes
 `report.partial.json` after every completed row and creates `report.json` only after the entire
 selected-engine plan succeeds:
@@ -103,9 +202,17 @@ headers for reproducibility and must remain untracked; only reviewed, synthetic-
 evidence belongs in the repository.
 
 Direct hosted capture also fetches every selected synthetic asset before browser launch and requires
-`200 image/svg+xml`, the local fixture's exact SHA-256, and declared `360x120` bounds. A direct report
-without an exact browser version is marked ineligible as compatibility evidence; it remains useful
-only as a structural observation. The direct harness also carries an explicit `status`: every
+`200 image/svg+xml`, the local fixture's exact SHA-256, and declared `360x120` bounds. That Node
+preflight is not treated as proof of what the browser rendered. Each hosted browser context routes
+the exact selected URL, rejects redirects/status/MIME/body drift, and fulfills the image with the
+same body it hashed. A recorded row must bind one continuous request; an independent five-frame
+row must bind five observations with an identical response identity. Each row retains only the
+synthetic-safe URL, status, content type, body SHA-256, selected asset name, and interception count;
+raw response headers remain outside the direct report.
+
+A direct report without an exact browser version is marked ineligible as compatibility evidence;
+it remains useful only as a structural observation. The direct harness also carries an explicit
+`status`: every
 `report.partial.json` written mid-run stays `partial` and ineligible, and only the completed
 `report.json` is marked `complete` and re-evaluated for eligibility, so an interrupted matrix can
 never present itself as compatibility evidence. A direct run's `report.partial.json` and
@@ -221,12 +328,14 @@ above.
 | --- | --- | --- | --- | --- | --- | --- |
 | Direct hosted Worker SVG with production SVG CSP | all probes measured | all probes measured | static control frozen | complete | complete | complete |
 | Worker SVG in GitHub README through Camo | `css-enter` animates | `css-enter` animates | static control frozen | diagnostic complete | diagnostic complete | **not tested** |
-| Relative scratch SVG through GitHub raw | `css-enter` animates | `css-enter` animates | static control frozen | diagnostic complete | diagnostic complete | **not tested** |
+| Relative scratch SVG through GitHub raw | `css-enter` animates | `css-enter` animates | static control frozen | diagnostic complete | diagnostic complete | three diagnostic rows complete; seven-row gate incomplete |
 
 The full hosted plan is still 35 rows per engine (105 total): every probe under both hosted paths
-and embed forms, two reduced-motion controls, and the positive control. After #180 proves identity
-independently of WebKit intrinsic sizing, rerun only its seven-row diagnostic once. If green, resume
-#113 at that unfiltered three-engine raw/Camo plan. The direct Worker matrix does not need rerunning.
+and embed forms, two reduced-motion controls, and the positive control. The October 26 WebKit run
+completed all seven discoveries and three raw recordings, then failed closed on the Camo 250 ms
+sample's completion limit. No retry ran. Complete the separate timing-instrumentation follow-up
+and review a new bounded run before resuming #113's unfiltered plan. The direct Worker matrix does
+not need rerunning.
 
 ## PR #77 reconciliation and provisional selection
 

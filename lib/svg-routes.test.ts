@@ -7,6 +7,7 @@ import {
   parseMotion,
   parseStandaloneMotion,
   parseSvgAtlasQuery,
+  parseSvgSceneQuery,
   parseSvgActivityQuery,
   parseSvgLanguagesQuery,
   parseSvgProfileQuery,
@@ -32,11 +33,14 @@ test("accepts the inclusive ASCII activity day boundaries and defaults to 365", 
   assert.equal(parseActivityDays(null), 365);
   assert.equal(parseActivityDays("7"), 7);
   assert.equal(parseActivityDays("365"), 365);
+  assert.equal(parseActivityDays("366"), 366);
+  assert.equal(parseActivityDays("730"), 730);
+  assert.equal(parseActivityDays("auto"), "auto");
 });
 
 test("rejects signs, decimals, non-ASCII digits, and out-of-range activity days", () => {
-  for (const value of ["6", "366", "+7", "-1", "7.0", "０７", "٧", "0070"]) {
-    assert.throws(() => parseActivityDays(value), /days/);
+  for (const value of ["6", "731", "+7", "-1", "7.0", "０７", "٧", "0070", "Auto", "automatic", " auto"]) {
+    assert.throws(() => parseActivityDays(value), /days must be an integer from 7 to 730/);
   }
 });
 
@@ -65,7 +69,13 @@ test("parses profile, streak, activity, and language contracts with canonical or
   const profile = parseSvgProfileQuery(new URLSearchParams("theme=paper&demo=true&user=octocat"));
   assert.deepEqual(profile, { user: "octocat", demo: true, theme: "paper", motion: "none", canonical: "user=octocat&demo=true&theme=paper&motion=none" });
   assert.deepEqual(parseSvgStreakQuery(new URLSearchParams("user=octocat")), {
-    user: "octocat", demo: false, theme: "aurora", motion: "none", canonical: "user=octocat&demo=false&theme=aurora&motion=none",
+    user: "octocat", demo: false, theme: "aurora", days: 365, motion: "none", canonical: "user=octocat&demo=false&theme=aurora&days=365&motion=none",
+  });
+  assert.deepEqual(parseSvgStreakQuery(new URLSearchParams("user=octocat&days=730")), {
+    user: "octocat", demo: false, theme: "aurora", days: 730, motion: "none", canonical: "user=octocat&demo=false&theme=aurora&days=730&motion=none",
+  });
+  assert.deepEqual(parseSvgActivityQuery(new URLSearchParams("user=octocat&days=auto")), {
+    user: "octocat", demo: false, theme: "aurora", days: "auto", motion: "none", canonical: "user=octocat&demo=false&theme=aurora&days=auto&motion=none",
   });
   assert.deepEqual(parseSvgLanguagesQuery(new URLSearchParams("user=octocat&theme=ember")), {
     user: "octocat", demo: false, theme: "ember", motion: "none", canonical: "user=octocat&demo=false&theme=ember&motion=none",
@@ -76,6 +86,31 @@ test("parses profile, streak, activity, and language contracts with canonical or
   });
 });
 
+
+test("accepts ambient and rejects cinematic across every hosted SVG query", () => {
+  const routes: readonly {
+    readonly parse: (parameters: URLSearchParams) => { readonly motion: string; readonly canonical: string };
+    readonly base: string;
+  }[] = [
+    { parse: parseSvgProfileQuery, base: "user=octocat&demo=true&theme=aurora" },
+    { parse: parseSvgStreakQuery, base: "user=octocat&demo=true&theme=aurora" },
+    { parse: parseSvgLanguagesQuery, base: "user=octocat&demo=true&theme=aurora" },
+    { parse: parseSvgActivityQuery, base: "user=octocat&demo=true&theme=aurora&days=365" },
+    { parse: parseSvgAtlasQuery, base: "user=octocat&demo=true&theme=aurora&days=365&layout=wide" },
+    { parse: parseSvgProjectsQuery, base: "owner=octocat&repos=atlas&states=atlas:active&demo=true&theme=aurora" },
+    { parse: parseSvgSceneQuery, base: "user=octocat&demo=true" },
+  ];
+
+  for (const { parse, base } of routes) {
+    const ambient = parse(new URLSearchParams(`${base}&motion=ambient`));
+    assert.equal(ambient.motion, "ambient");
+    assert.match(ambient.canonical, /(?:^|&)motion=ambient(?:&|$)/);
+    assert.throws(
+      () => parse(new URLSearchParams(`${base}&motion=cinematic`)),
+      /motion must be none, subtle, or ambient/,
+    );
+  }
+});
 test("rejects unknown and duplicate SVG keys before query values are read", () => {
   for (const query of [
     "user=octocat&unknown=x",
@@ -111,6 +146,21 @@ test("canonicalizes escaped workflow delimiters without semantic collisions", ()
   }));
   assert.equal(query.workflows.get("alpha"), workflow);
   assert.equal(query.canonical, "owner=acme&repos=alpha&states=alpha%3Aactive&workflows=alpha%3Aci%252Crelease%253Anightly.yml&demo=true&theme=paper&motion=none");
+});
+
+test("omitted and survey packs share a canonical key and other packs stay distinct", () => {
+  const base = "user=octocat&demo=false";
+  const omitted = parseSvgSceneQuery(new URLSearchParams(base));
+  const survey = parseSvgSceneQuery(new URLSearchParams(`${base}&pack=survey`));
+  const orbital = parseSvgSceneQuery(new URLSearchParams(`${base}&pack=orbital`));
+  assert.equal(omitted.pack, "survey");
+  assert.equal(survey.pack, "survey");
+  assert.equal(orbital.pack, "orbital");
+  assert.equal(omitted.canonical, survey.canonical);
+  assert.equal(omitted.canonical.includes("pack="), false);
+  assert.equal(orbital.canonical.includes("pack=orbital"), true);
+  assert.notEqual(omitted.canonical, orbital.canonical);
+  assert.throws(() => parseSvgSceneQuery(new URLSearchParams(`${base}&pack=nope`)), /pack must be orbital, survey, spectral, or terminal/);
 });
 
 test("requires exact project inputs and rejects invalid workflow identities", () => {

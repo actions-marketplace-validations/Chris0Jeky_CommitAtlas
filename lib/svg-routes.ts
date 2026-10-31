@@ -1,4 +1,4 @@
-import type { ThemeName } from "@/packages/svg/src/index";
+import type { HostedMotionProfile, ScenePack, ThemeName } from "@/packages/svg/src/index";
 import type { ProjectLifecycle, ProjectWorkflow } from "./github/types";
 import { encodeWorkflowMapComponent } from "./github/workflow-map";
 import {
@@ -19,19 +19,20 @@ export interface SvgProfileQuery {
   readonly user: string;
   readonly demo: boolean;
   readonly theme: ThemeName;
-  readonly motion: "none" | "subtle";
+  readonly motion: HostedMotionProfile;
   readonly canonical: string;
 }
 
-export type SvgStreakQuery = SvgProfileQuery;
 export type SvgLanguagesQuery = SvgProfileQuery;
 
 export interface SvgActivityQuery extends SvgProfileQuery {
-  readonly days: number;
+  readonly days: number | "auto";
 }
 
+export type SvgStreakQuery = SvgActivityQuery;
+
 export interface SvgAtlasQuery extends SvgActivityQuery {
-  readonly motion: "none" | "subtle";
+  readonly motion: HostedMotionProfile;
   readonly layout: "wide" | "compact";
   readonly repos: readonly string[];
   readonly states: ReadonlyMap<string, ProjectLifecycle>;
@@ -53,7 +54,7 @@ export interface SvgProjectsQuery {
   readonly projects: readonly SvgProjectQueryItem[];
   readonly demo: boolean;
   readonly theme: ThemeName;
-  readonly motion: "none" | "subtle";
+  readonly motion: HostedMotionProfile;
   readonly canonical: string;
 }
 
@@ -73,7 +74,7 @@ export function parseSvgProfileQuery(parameters: URLSearchParams): SvgProfileQue
 }
 
 export function parseSvgStreakQuery(parameters: URLSearchParams): SvgStreakQuery {
-  return parseSvgProfileQuery(parameters);
+  return parseSvgActivityQuery(parameters);
 }
 
 export function parseSvgActivityQuery(parameters: URLSearchParams): SvgActivityQuery {
@@ -132,6 +133,58 @@ export function parseSvgAtlasQuery(parameters: URLSearchParams): SvgAtlasQuery {
   return { user, demo, theme, days, motion, layout, repos, states, workflows, projects, canonical: canonicalQuery(canonicalEntries) };
 }
 
+export interface SvgSceneQuery extends SvgAtlasQuery {
+  readonly pack: ScenePack;
+}
+
+/** Hosted scenes share the Atlas project query and add a closed pack. Defaults stay out of the canonical key. */
+export function parseSvgSceneQuery(parameters: URLSearchParams): SvgSceneQuery {
+  const allowed = ["user", "repos", "states", "workflows", "demo", "theme", "days", "motion", "layout", "pack"] as const;
+  rejectUnknownParameters(parameters, allowed);
+  const user = parseGitHubHandle(parameters.get("user"));
+  const demo = parseDemo(parameters.get("demo"));
+  const theme = parseTheme(parameters.get("theme"));
+  const days = parseActivityDays(parameters.get("days"));
+  const motion = parseStandaloneMotion(parameters.get("motion"));
+  const layout = parseAtlasLayout(parameters.get("layout"));
+  const pack = parseScenePack(parameters.get("pack"));
+  const rawRepos = parameters.get("repos");
+  if (rawRepos === null && (parameters.has("states") || parameters.has("workflows"))) {
+    throw new InputError("states and workflows require repos");
+  }
+  const repos = rawRepos === null ? [] : parseRepositoryNames(rawRepos);
+  const states = repos.length > 0 ? parseLifecycleMap(parameters.get("states"), repos) : new Map<string, ProjectLifecycle>();
+  const workflows = repos.length > 0 ? parseWorkflowMap(parameters.get("workflows"), repos) : new Map<string, ProjectWorkflow>();
+  const projects = repos.map((repository) => ({
+    repository,
+    lifecycle: states.get(repository.toLowerCase())!,
+    workflow: workflows.get(repository.toLowerCase()) ?? null,
+  }));
+  const canonicalEntries: [string, string][] = [["user", user]];
+  if (projects.length > 0) {
+    canonicalEntries.push(["repos", repos.join(",")]);
+    canonicalEntries.push(["states", projects.map(({ repository, lifecycle }) => `${repository}:${lifecycle}`).join(",")]);
+    const workflowValue = projects
+      .filter(({ workflow }) => workflow !== null)
+      .map(({ repository, workflow }) => `${repository}:${encodeWorkflowMapComponent(workflow!)}`)
+      .join(",");
+    if (workflowValue) canonicalEntries.push(["workflows", workflowValue]);
+  }
+  canonicalEntries.push(["demo", String(demo)]);
+  if (theme !== "aurora") canonicalEntries.push(["theme", theme]);
+  if (days !== 365) canonicalEntries.push(["days", String(days)]);
+  if (motion !== "none") canonicalEntries.push(["motion", motion]);
+  if (layout !== "wide") canonicalEntries.push(["layout", layout]);
+  if (pack !== "survey") canonicalEntries.push(["pack", pack]);
+  return { user, demo, theme, days, motion, layout, repos, states, workflows, projects, pack, canonical: canonicalQuery(canonicalEntries) };
+}
+
+export function parseScenePack(value: string | null): ScenePack {
+  if (value === null || value === "survey") return "survey";
+  if (value === "orbital" || value === "spectral" || value === "terminal") return value;
+  throw new InputError("pack must be orbital, survey, spectral, or terminal");
+}
+
 export function parseSvgProjectsQuery(parameters: URLSearchParams): SvgProjectsQuery {
   const allowed = ["owner", "repos", "states", "workflows", "demo", "theme", "motion"] as const;
   rejectUnknownParameters(parameters, allowed);
@@ -168,24 +221,25 @@ export function parseTheme(value: string | null): ThemeName {
   throw new InputError("theme must be aurora, midnight, paper, or ember");
 }
 
-export function parseActivityDays(value: string | null): number {
+export function parseActivityDays(value: string | null): number | "auto" {
   if (value === null) return 365;
-  if (!/^[0-9]{1,3}$/.test(value)) throw new InputError("days must be an integer from 7 to 365");
+  if (value === "auto") return "auto";
+  if (!/^[0-9]{1,3}$/.test(value)) throw new InputError('days must be an integer from 7 to 730 or "auto"');
   const days = Number(value);
-  if (days < 7 || days > 365) throw new InputError("days must be an integer from 7 to 365");
+  if (days < 7 || days > 730) throw new InputError('days must be an integer from 7 to 730 or "auto"');
   return days;
 }
 
-export function parseMotion(value: string | null): "none" | "subtle" {
+export function parseMotion(value: string | null): HostedMotionProfile {
   if (value === null || value === "subtle") return "subtle";
-  if (value === "none") return "none";
-  throw new InputError("motion must be subtle or none");
+  if (value === "none" || value === "ambient") return value;
+  throw new InputError("motion must be none, subtle, or ambient");
 }
 
-export function parseStandaloneMotion(value: string | null): "none" | "subtle" {
+export function parseStandaloneMotion(value: string | null): HostedMotionProfile {
   if (value === null || value === "none") return "none";
-  if (value === "subtle") return "subtle";
-  throw new InputError("motion must be subtle or none");
+  if (value === "subtle" || value === "ambient") return value;
+  throw new InputError("motion must be none, subtle, or ambient");
 }
 
 export function parseAtlasLayout(value: string | null): "wide" | "compact" {
